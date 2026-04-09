@@ -1,0 +1,232 @@
+================================================================================
+xArm5 ROS 2 Jazzy - Full Start Steps (Do These In Order Every Time)
+================================================================================
+
+This is your operational checklist. Follow top to bottom, every session.
+Robot IP: 192.168.1.234
+Laptop Ethernet: enxa0cec8775699 at 192.168.1.100/24
+
+================================================================================
+>>> RESUME POINT - Last completed: 2026-04-08
+================================================================================
+
+ALREADY DONE - skip these permanently:
+  [DONE] ROS 2 Jazzy installed
+  [DONE] ~/xarm_ws built (13 packages, 0 errors)
+  [DONE] xarm5_basic_position_cmd built and registered
+  [DONE] Robot pinged successfully (192.168.1.234, <1ms, 0% loss)
+  [DONE] Laptop on correct subnet (192.168.1.100/24 via enxa0cec8775699)
+
+START HERE NEXT SESSION -> PHASE 1 (physical startup), then skip to PHASE 5.
+Phase 2 network setup is already done permanently unless you change machines.
+Do NOT re-run colcon build unless you modify source files.
+
+CONFIRMED WORKING as of 2026-04-08:
+  - Driver launches with: ros2 launch xarm_api xarm5_driver.launch.py robot_ip:=192.168.1.234
+  - Joint moves work via: /xarm/set_servo_angle (NOT /xarm/move_joint)
+  - Enable sequence: clean_error -> motion_enable -> set_mode -> set_state
+  - Robot physically moved and verified responsive
+
+Source command to run at the top of every new terminal (always required):
+  source /opt/ros/jazzy/setup.bash && source ~/xarm_ws/install/setup.bash
+
+================================================================================
+>>> END RESUME POINT
+================================================================================
+
+================================================================================
+PHASE 1 - PHYSICAL STARTUP
+================================================================================
+
+1. Clear the robot workspace. Remove anything within 1 meter of the arm.
+
+2. Release the E-stop button if it is pressed (twist to release).
+
+3. Power on the xArm5 control box using the switch on the back or front panel.
+
+4. Wait ~30 seconds for the control box to fully boot.
+
+5. Connect the Ethernet cable between the control box and your laptop.
+
+================================================================================
+PHASE 2 - VERIFY NETWORK
+================================================================================
+
+6. Check your laptop Ethernet interface is on the same subnet as the robot.
+
+   Check current interfaces:
+     ip addr show
+
+   If your laptop Ethernet is not on 192.168.1.xxx, set it:
+     sudo ip addr add 192.168.1.100/24 dev eth0
+     sudo ip link set eth0 up
+
+   Replace eth0 with your actual interface name (e.g. enp3s0, enx...).
+   Run "ip addr show" to find the right name.
+
+7. Ping the robot to confirm it is reachable:
+     ping -c 4 192.168.1.234
+
+   Expected: 4 packets received, 0% loss, <5ms RTT.
+   If ping fails, stop here and fix the network before continuing.
+
+================================================================================
+PHASE 3 - ENABLE THE ROBOT IN UFACTORY STUDIO
+================================================================================
+
+8. Open a browser and go to:
+     http://192.168.1.234
+
+   This opens UFactory Studio on the control box.
+
+9. Check the robot status in Studio:
+   - Should show "Ready" or "Standby"
+   - No error codes displayed
+   - No active E-stop
+
+10. If the robot is not enabled, click "Enable Robot" in Studio.
+    Wait until the status changes to Ready before continuing.
+
+================================================================================
+PHASE 4 - PREPARE TERMINALS
+================================================================================
+
+You will need 2 terminals open. Do the following source command at the
+top of EVERY terminal you open:
+
+  source /opt/ros/jazzy/setup.bash && source ~/xarm_ws/install/setup.bash
+
+If you haven't built the workspace yet, do the one-time build first:
+  See README_SETUP.txt section B before continuing.
+
+================================================================================
+PHASE 5 - LAUNCH THE DRIVER (Terminal 1 - keep this running the whole session)
+================================================================================
+
+11. In Terminal 1, launch the xArm5 driver:
+
+      source /opt/ros/jazzy/setup.bash && source ~/xarm_ws/install/setup.bash
+      ros2 launch xarm_api xarm5_driver.launch.py robot_ip:=192.168.1.234
+
+    Expected output:
+      [xarm_driver_node]: xArm5 connected ...
+      [xarm_driver_node]: joint_states publisher started
+
+    Leave this terminal running. Do not close it.
+
+12. Verify the driver services are available (in a second terminal):
+
+      ros2 service list | grep xarm
+
+    You should see a long list including:
+      /xarm/motion_enable
+      /xarm/set_mode
+      /xarm/set_state
+      /xarm/set_position
+      /xarm/set_gripper_enable
+      /xarm/set_gripper_position
+
+    If the list is empty, the driver is not running or not connected.
+
+================================================================================
+PHASE 6 - ENABLE MOTION (Terminal 2)
+================================================================================
+
+Run these three commands in order. Each should return ret: 0.
+
+13. Enable all joints:
+      ros2 service call /xarm/motion_enable xarm_msgs/srv/SetInt16ById "{id: 8, data: 1}"
+
+14. Set position mode:
+      ros2 service call /xarm/set_mode xarm_msgs/srv/SetInt16 "{data: 0}"
+
+15. Set ready state:
+      ros2 service call /xarm/set_state xarm_msgs/srv/SetInt16 "{data: 0}"
+
+    Any non-zero ret means something is wrong. Check robot state in Studio.
+
+================================================================================
+PHASE 7 - VERIFY JOINT STATES
+================================================================================
+
+16. Confirm the robot is publishing joint positions:
+
+      ros2 topic echo /xarm/joint_states --once
+
+    Expected: 5 joint positions printed (xArm5 has 5 joints).
+    If this hangs or prints nothing, the driver is not connected properly.
+
+================================================================================
+PHASE 8 - SEND A JOINT MOVE (Terminal 2 or 3)
+================================================================================
+
+IMPORTANT: Use /xarm/set_servo_angle — NOT /xarm/move_joint.
+/xarm/move_joint appears in the service list but has no type and never responds.
+This was confirmed broken on 2026-04-08.
+
+17. Safe first move — rotates base 6° only, cannot hit table:
+
+      ros2 service call /xarm/set_servo_angle xarm_msgs/srv/MoveJoint "{angles: [0.1, 0.0, 0.0, 0.0, 0.0], speed: 0.1, acc: 2.0, mvtime: 0.0, wait: true}"
+
+    Expected: ret=0, arm rotates slightly at the base.
+    Keep the command on ONE LINE — multiline paste breaks the shell.
+
+18. Return to home (all joints to zero):
+
+      ros2 service call /xarm/set_servo_angle xarm_msgs/srv/MoveJoint "{angles: [0.0, 0.0, 0.0, 0.0, 0.0], speed: 0.1, acc: 2.0, mvtime: 0.0, wait: true}"
+
+    WARNING: Positive angles on J2 and J4 move the arm DOWN toward the table
+    in this mounting. Always test J1 (base rotation) first.
+
+19. To run a Cartesian move via the move_to_pose node (NOT YET TESTED):
+
+      ros2 launch xarm5_basic_position_cmd move_to_pose.launch.py
+
+    Default target: x=300mm, y=0mm, z=300mm, roll=180deg, tool pointing down.
+    Speed: 50 mm/s. Verify target is safe before running.
+
+================================================================================
+PHASE 9 - OPTIONAL: VERIFY GRIPPER
+================================================================================
+
+19. Confirm gripper services exist:
+      ros2 service list | grep gripper
+
+20. Enable the gripper:
+      ros2 service call /xarm/set_gripper_enable xarm_msgs/srv/SetInt16 "{data: 1}"
+
+21. Set gripper speed:
+      ros2 service call /xarm/set_gripper_speed xarm_msgs/srv/SetFloat32 "{data: 1500.0}"
+
+22. Get current gripper position:
+      ros2 service call /xarm/get_gripper_position xarm_msgs/srv/GetFloat32 "{}"
+
+================================================================================
+PHASE 10 - SHUTDOWN
+================================================================================
+
+23. Stop the move node if still running: Ctrl+C in Terminal 2.
+
+24. Stop the driver: Ctrl+C in Terminal 1.
+
+25. In UFactory Studio, disable the robot (click Disable or E-stop).
+
+26. Power off the control box.
+
+================================================================================
+QUICK REFERENCE - IF SOMETHING GOES WRONG
+================================================================================
+
+Problem                          Fix
+-------------------------------  -----------------------------------------------
+Ping fails                       Check subnet (Phase 2), check cable, check power
+Driver fails to connect          Ping first. Studio must show robot as Ready.
+service call returns non-zero    Check Studio for error codes, re-enable robot
+ros2 service list is empty       Driver not running or not sourced. Check Terminal 1
+Move fails mid-motion            Robot hit a joint limit or collision. Check Studio.
+Gripper services missing         Add add_gripper:=true to the driver launch command
+Node exits with "not available"  Driver not running. Start Phase 5 first.
+
+================================================================================
+END
+================================================================================
