@@ -7,6 +7,195 @@
 
 ---
 
+## PROJECT OVERVIEW & DETAILED GOALS
+
+### What Is This Project?
+
+This is a **robotics automation project** to enable an xArm5 industrial robotic arm to autonomously:
+1. **Detect tools** using AprilTag fiducial markers
+2. **Plan collision-aware motion** using inverse kinematics
+3. **Pick up and relocate tools** with gripper control
+4. **Repeat reliably** across different tool positions
+
+The arm will work in a structured environment (table with tools) and move detected tools to a designated drop location.
+
+### The Problem We're Solving
+
+**Current State (Before This Project):**
+- xArm5 driver works at low level (can send joint angles or Cartesian targets)
+- No planning layer to avoid collisions
+- No IK solver optimized for narrow workspaces
+- No perception to detect what needs picking
+- Manual human intervention required for each task
+
+**Desired State (After This Project):**
+- Robot sees a tool via AprilTag
+- Robot autonomously plans a safe pick-and-place trajectory
+- Robot picks up the tool, lifts it, moves to drop zone, and releases it
+- Gripper timing is correct (doesn't drop mid-motion)
+- Process repeats for different tools at different positions
+
+### Why This Matters
+
+**Inverse Kinematics (IK) is critical:**
+- xArm5 has only 5 DOF (degrees of freedom)
+- Cannot satisfy arbitrary full 6-DOF pose requests
+- Default KDL solver struggles near joint limits and singular configurations
+- **TRAC-IK** runs two strategies in parallel and returns when one converges → **more reliable** near singularities
+
+**Robust planning is critical:**
+- Direct service calls don't check collisions
+- MoveIt2 with TRAC-IK provides **collision-aware trajectory planning**
+- Ensures arm doesn't crash into table or itself
+
+**AprilTag perception closes the loop:**
+- Tool location is not hardcoded
+- Robot can work with tools placed in different spots
+- System is **flexible and practical**
+
+### End Goal (What Success Looks Like)
+
+**When complete, you'll have:**
+```
+AprilTag on tool
+     ↓ (detects position)
+Tool pose in robot frame
+     ↓ (converts to grasp sequence)
+Pre-grasp pose, grasp pose, lift pose, drop pose
+     ↓ (solves with TRAC-IK, plans collision-free path)
+MoveIt/TRAC-IK trajectory
+     ↓ (executes with real-time gripper control)
+Tool successfully picked and relocated
+     ↓ (autonomous, repeatable, safe)
+Ready for next tool
+```
+
+**Concrete Success Criteria:**
+1. ✅ Robot detects AprilTag on tool
+2. ✅ Robot generates pre-grasp → grasp → lift → drop sequence
+3. ✅ TRAC-IK solves each pose reliably (>95% success rate)
+4. ✅ MoveIt plans collision-free trajectories
+5. ✅ Gripper opens/closes at right moments
+6. ✅ Tool is successfully moved to drop zone
+7. ✅ Process repeats 10+ times without failure
+8. ✅ Works for tools in different positions
+
+### Technical Approach
+
+**Instead of solving this all at once, we break it into 8 phases:**
+
+| Phase | What | Why |
+|-------|------|-----|
+| 0 | Planning & setup | Understand before coding |
+| 1 | Validate Cartesian frame | Ensure x/y/z conventions are right |
+| 2 | Bring in MoveIt | Get planning layer working |
+| 3 | Swap default IK for TRAC-IK | Better IK solver |
+| 4 | Characterize reachable poses | Know what's feasible |
+| 5 | Create pose generator | Convert detection → grasp sequence |
+| 6 | Add collision objects | Safe planning |
+| 7 | Test gripper integration | Timing and sequencing |
+| 8 | Connect AprilTag perception | Close the loop |
+
+**Each phase validates before the next begins.** This is slower but **safer and more reliable**.
+
+### Why Each Phase Exists
+
+**Phase 1 (Cartesian Validation):** 
+- If frame conventions are wrong, everything downstream is wrong
+- A mathematically valid solution can be physically wrong
+- **Must validate on hardware before building on top**
+
+**Phase 2 (MoveIt):**
+- MoveIt is the industry standard for ROS 2 motion planning
+- It owns the robot state and trajectory planning
+- IK solvers plug into MoveIt (not standalone)
+
+**Phase 3 (TRAC-IK):**
+- Default KDL solver has known limitations for 5-DOF arms
+- TRAC-IK is more robust
+- Must install and configure it correctly
+
+**Phases 4-5 (Reachability & Pose Generation):**
+- 5-DOF arm cannot solve arbitrary 6D poses
+- Must define a constrained family of poses that ARE feasible
+- Pre-grasp, grasp, lift, drop have specific constraints
+
+**Phase 6 (Collision Objects):**
+- Planning is useless if trajectories hit the table
+- Must define obstacles (table, staging area, drop zone)
+
+**Phase 7 (Gripper):**
+- Gripper timing affects success
+- Must test opening/closing during motion
+- Object retention during lift is critical
+
+**Phase 8 (AprilTag):**
+- Only integrate perception when deterministic motion already works
+- Hard-coded poses prove the system works
+- Then add the intelligence layer
+
+### Expected Outcome
+
+**After all 8 phases, you will have:**
+
+1. **Validated Hardware State:**
+   - Frame conventions confirmed
+   - Safe operating poses documented
+   - Gripper behavior understood
+
+2. **Robust Planning System:**
+   - TRAC-IK active and reliable
+   - MoveIt managing all motion
+   - Collision-aware trajectories
+
+3. **Deterministic Manipulation:**
+   - Pre-grasp → grasp → lift → drop sequence works 100%
+   - Gripper timing correct
+   - No dropped objects mid-motion
+
+4. **Autonomous Perception Loop:**
+   - AprilTag detection drives motion
+   - Tools detected automatically
+   - Positions don't need hardcoding
+
+5. **Production-Ready Code:**
+   - Modular architecture (4 nodes)
+   - Well-tested and documented
+   - Ready for real-world deployment
+
+### Project Architecture (End State)
+
+```
+PERCEPTION LAYER
+├── AprilTag Detector
+│   └── Outputs: /tool_pose (position of detected tool)
+
+PLANNING LAYER
+├── Grasp Pose Generator (converts tool pose → grasp sequence)
+├── MoveIt2 Planner (uses TRAC-IK solver)
+└── Collision Scene (table, obstacles, margins)
+
+EXECUTION LAYER
+├── MoveIt Executor (sends trajectories to driver)
+├── Gripper Controller (opens/closes at right times)
+└── Joint State Feedback
+
+DRIVER LAYER
+└── Official xarm_ros2 (low-level robot control)
+```
+
+All 4 layers work together: perception → planning → execution → feedback loop
+
+### Why This Architecture?
+
+- **Modular:** Each layer can be tested independently
+- **Reliable:** Collision checking before every move
+- **Flexible:** Different tools, different positions
+- **Production-grade:** Uses official drivers and industry-standard planners
+- **Maintainable:** Clear separation of concerns
+
+---
+
 ## Project Context
 
 This is a **robotics project** to add robust inverse kinematics (TRAC-IK) to an xArm5 manipulator, enabling autonomous pick-and-place of tools detected via AprilTags.

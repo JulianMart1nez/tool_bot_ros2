@@ -1,0 +1,113 @@
+═══════════════════════════════════════════════════════════════
+PHASE 1: CARTESIAN MOTION VALIDATION RESULTS
+═══════════════════════════════════════════════════════════════
+
+Date: 2026-04-10
+Robot: xArm5, Firmware v2.3.0, IP 192.168.1.234
+Method: xArm Python SDK 1.17.3 (direct TCP, bypassing ROS driver)
+Branch: julian_tracik_integration
+
+═══════════════════════════════════════════════════════════════
+TEST RESULTS
+═══════════════════════════════════════════════════════════════
+
+TEST 1: HOME (x=300, y=0, z=300, roll=180, pitch=0, yaw=0)
+├─ Return code: 0
+├─ Position after: [299.7, 0.0, 299.4, -180.0, -0.0, 0.0]
+├─ Error code: 0
+└─ RESULT: PASS ✓
+
+TEST 2: +X OFFSET (x=350, y=0, z=300, roll=180, pitch=0, yaw=0)
+├─ Expected: 50mm further forward than TEST 1
+├─ Return code: 0
+├─ Position after: [349.7, 0.0, 300.0, -180.0, -0.0, -0.0]
+├─ Error code: 0
+└─ RESULT: PASS ✓
+
+TEST 3: -X OFFSET (x=250, y=0, z=300, roll=180, pitch=0, yaw=0)
+├─ Expected: 50mm closer than TEST 1
+├─ Return code: 0
+├─ Position after: [252.4, 0.0, 300.0, -180.0, -0.0, -0.0]
+├─ Error code: 0
+└─ RESULT: PASS ✓
+
+TEST 4: +Z OFFSET (x=300, y=0, z=350, roll=180, pitch=0, yaw=0)
+├─ Expected: 50mm higher than TEST 1
+├─ Return code: 0
+├─ Position after: [300.0, 0.0, 350.0, -180.0, 0.0, 0.0]
+├─ Error code: 0
+└─ RESULT: PASS ✓
+
+TEST 5: -Z OFFSET (x=300, y=0, z=250, roll=180, pitch=0, yaw=0)
+├─ Expected: 50mm lower (closer to table) — CAUTION
+├─ Return code: 0
+├─ Position after: [300.0, 0.0, 250.5, -180.0, -0.0, -0.0]
+├─ Error code: 0
+└─ RESULT: PASS ✓
+
+TEST 6: YAW +15 (x=300, y=0, z=300, roll=180, pitch=0, yaw=15)
+├─ Expected: Tool rotates ~15 deg around z-axis
+├─ Return code: 0
+├─ Position after: [300.0, 0.0, 300.0, -180.0, -0.0, 14.4]
+├─ Error code: 0
+└─ RESULT: PASS ✓
+
+TEST 7: YAW -15 (x=300, y=0, z=300, roll=180, pitch=0, yaw=-15)
+├─ Expected: Tool rotates ~15 deg opposite direction
+├─ Return code: 0
+├─ Position after: [300.0, 0.0, 300.0, -180.0, 0.0, -14.4]
+├─ Error code: 0
+└─ RESULT: PASS ✓
+
+TEST 8: X+Z COMBO (x=320, y=0, z=320, roll=180, pitch=0, yaw=0)
+├─ Expected: Diagonal motion (forward + up) from home
+├─ Return code: 0
+├─ Position after: [318.9, 0.0, 318.9, -180.0, -0.0, 0.0]
+├─ Error code: 0
+└─ RESULT: PASS ✓
+
+═══════════════════════════════════════════════════════════════
+SUMMARY: 8/8 PASSED
+═══════════════════════════════════════════════════════════════
+
+FRAME CONVENTION VALIDATION:
+┌────────────────────────────────────────────┐
+│ X-AXIS (forward/backward)                  │
+│ ├─ Tests 2 & 3 confirm: +X = FORWARD      │
+│ └─ Direction correct: YES                  │
+│                                            │
+│ Y-AXIS (left/right)                        │
+│ ├─ Not explicitly tested (y=0 in all)      │
+│ └─ Assumption: +Y = LEFT (standard)        │
+│                                            │
+│ Z-AXIS (up/down)                           │
+│ ├─ Tests 4 & 5 confirm: +Z = UP           │
+│ └─ Direction correct: YES                  │
+│                                            │
+│ ROLL (tool orientation)                    │
+│ ├─ roll=180 = tool pointing DOWN           │
+│ └─ Convention correct: YES                 │
+│                                            │
+│ YAW (base rotation around z-axis)          │
+│ ├─ Tests 6 & 7 confirm rotation works      │
+│ ├─ +yaw = counterclockwise (from above)    │
+│ └─ Convention correct: YES                 │
+└────────────────────────────────────────────┘
+
+POSITION ACCURACY:
+  Typical error: <2.5mm (within spec for xArm5)
+  Yaw accuracy: ~0.6 deg error at 15 deg target
+  All positions within acceptable tolerance
+
+NOTES:
+  - ROS2 xarm_api driver has a state management bug: the set_mode
+    service calls set_state(STOP) internally, and subsequent
+    set_state(0) transitions to state=2 (standby) instead of
+    state=0 (ready). This causes set_position to return error 9
+    (STATE_NOT_READY). Joint moves (set_servo_angle) and
+    move_gohome work correctly through ROS.
+  - Phase 1 tests ran using xArm Python SDK to bypass this issue.
+  - ROS node fix needed before Phase 2.
+  - Factory home position: x=207, y=0, z=112 (all joints zero)
+
+NEXT MILESTONE: READY FOR PHASE 2 (MoveIt Setup)

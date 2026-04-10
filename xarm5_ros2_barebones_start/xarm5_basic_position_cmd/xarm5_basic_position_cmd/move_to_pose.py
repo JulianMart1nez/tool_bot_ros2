@@ -8,10 +8,17 @@ Assumes the official UFactory xarm_api driver is already running:
   ros2 launch xarm_api xarm5_driver.launch.py robot_ip:=<IP>
 
 This node:
-  1. Enables motion      (/xarm/motion_enable)
-  2. Sets mode 0         (/xarm/set_mode)
-  3. Sets state 0        (/xarm/set_state)
-  4. Moves to target     (/xarm/set_position)
+  1. Cleans errors        (/xarm/clean_error)
+  2. Enables motion       (/xarm/motion_enable)
+  3. Sets state 0         (/xarm/set_state)
+  4. Moves to target      (/xarm/set_position)
+
+NOTE: set_mode is intentionally skipped. The driver initializes mode 0
+on startup, and calling set_mode through the ROS service triggers an
+internal set_state(STOP) that leaves the robot in state 2 (standby)
+instead of state 0 (ready), causing Cartesian moves to fail with
+error 9 (STATE_NOT_READY). Joint moves are unaffected. This is a
+known issue with the xarm_ros2 Jazzy driver's service layer.
 
 All units:
   x, y, z     : millimeters
@@ -28,7 +35,8 @@ import rclpy
 from rclpy.node import Node
 
 # Official UFactory message types - these come from xarm_msgs package
-from xarm_msgs.srv import SetInt16       # set_mode, set_state, set_gripper_enable
+from xarm_msgs.srv import Call            # clean_error
+from xarm_msgs.srv import SetInt16       # set_state
 from xarm_msgs.srv import SetInt16ById   # motion_enable (needs joint id)
 from xarm_msgs.srv import MoveCartesian  # set_position (Cartesian move)
 
@@ -55,11 +63,11 @@ class MoveToPoser(Node):
         # Create service clients.
         # These talk to the driver node started by xarm5_driver.launch.py.
         # ---------------------------------------------------------------
+        self.cli_clean_error = self.create_client(
+            Call, '/xarm/clean_error')
+
         self.cli_motion_enable = self.create_client(
             SetInt16ById, '/xarm/motion_enable')
-
-        self.cli_set_mode = self.create_client(
-            SetInt16, '/xarm/set_mode')
 
         self.cli_set_state = self.create_client(
             SetInt16, '/xarm/set_state')
@@ -107,12 +115,12 @@ class MoveToPoser(Node):
     # -------------------------------------------------------------------
 
     def run(self):
-        """Execute the full enable → mode → state → move sequence."""
+        """Execute the full enable → state → move sequence."""
 
         # -- Wait for all services to come up ---------------------------
         services = [
+            (self.cli_clean_error,   '/xarm/clean_error'),
             (self.cli_motion_enable, '/xarm/motion_enable'),
-            (self.cli_set_mode,      '/xarm/set_mode'),
             (self.cli_set_state,     '/xarm/set_state'),
             (self.cli_set_position,  '/xarm/set_position'),
         ]
@@ -120,7 +128,13 @@ class MoveToPoser(Node):
             if not self._wait_for_service(client, name):
                 return  # driver not running, abort
 
-        # -- Step 1: Enable motion (id=8 enables all joints) -------------
+        # -- Step 1: Clean any existing errors ---------------------------
+        req = Call.Request()
+        resp = self._call_sync(self.cli_clean_error, req, 'clean_error')
+        if resp is None or resp.ret != 0:
+            return
+
+        # -- Step 2: Enable motion (id=8 enables all joints) -------------
         req = SetInt16ById.Request()
         req.id = 8    # 8 = all joints; use 1-5 for individual joints
         req.data = 1  # 1 = enable, 0 = disable
@@ -128,18 +142,10 @@ class MoveToPoser(Node):
         if resp is None or resp.ret != 0:
             return
 
-        # -- Step 2: Set mode 0 (position mode) --------------------------
-        # Mode 0: firmware handles trajectory planning (recommended for beginners)
-        # Mode 1: servo mode (real-time, advanced use only)
-        req = SetInt16.Request()
-        req.data = 0  # 0 = position mode
-        resp = self._call_sync(self.cli_set_mode, req, 'set_mode(0)')
-        if resp is None or resp.ret != 0:
-            return
-
         # -- Step 3: Set state 0 (ready/running) -------------------------
-        # State 0: ready to accept motion commands
-        # State 4: stop state
+        # NOTE: set_mode is intentionally NOT called here. The driver
+        # starts in mode 0. Calling set_mode via the ROS service
+        # triggers an internal STOP that prevents Cartesian moves.
         req = SetInt16.Request()
         req.data = 0  # 0 = ready
         resp = self._call_sync(self.cli_set_state, req, 'set_state(0)')
