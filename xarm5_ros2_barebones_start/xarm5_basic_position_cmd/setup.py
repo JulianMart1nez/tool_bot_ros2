@@ -27,6 +27,7 @@ setup(
     entry_points={
         'console_scripts': [
             'move_to_pose = xarm5_basic_position_cmd.move_to_pose:main',
+            'add_table_collision = xarm5_basic_position_cmd.add_table_collision:main',
         ],
     },
 )
