@@ -1,0 +1,34 @@
+AprilTag from Webcam
+
+Necessary ubuntu installs
+sudo apt-get install -y python3-opencv v4l-utils ros-jazzy-cv-bridge ros-jazzy-image-transport
+PIP_BREAK_SYSTEM_PACKAGES=1 pip install dt-apriltags (probably best with v-environment)
+
+in package.xml, add:
+<exec_depend>rclpy</exec_depend>
+<exec_depend>sensor_msgs</exec_depend>
+<exec_depend>cv_bridge</exec_depend>
+<exec_depend>python3-opencv</exec_depend>
+<exec_depend>python-dt-apriltags-pip</exec_depend>
+
+in setup.py, add to "entry_points":
+    entry_points={
+        'console_scripts': [
+        	'webcam_node = ros2_webcam_AT.webcam_node:main',
+        	'april_tag_ids_node = ros2_webcam_AT.april_tag_ids_node:main',
+        ],
+    },
+    
+    
+temp commands:
+build package
+	cd ~/ros2_webcam_AT
+	colcon build --packages-select ros2_webcam_AT
+	source /opt/ros/jazzy/setup.bash
+	source ~/ros2_webcam_AT/install/setup.bash
+run webcam publisher
+	ros2 run ros2_webcam_AT webcam_node --ros-args -p camera_index:=2	
+run aprilTag subscriber (with preview)
+	ros2 run ros2_webcam_AT april_tag_ids_node
+
+
