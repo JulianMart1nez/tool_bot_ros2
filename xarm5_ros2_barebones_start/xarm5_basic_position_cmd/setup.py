@@ -28,6 +28,8 @@ setup(
         'console_scripts': [
             'move_to_pose = xarm5_basic_position_cmd.move_to_pose:main',
             'add_table_collision = xarm5_basic_position_cmd.add_table_collision:main',
+            'grasp_pose_generator = xarm5_basic_position_cmd.grasp_pose_generator:main',
+            'auto_home = xarm5_basic_position_cmd.auto_home:main',
         ],
     },
 )
