@@ -14,8 +14,9 @@ in package.xml, add:
 in setup.py, add to "entry_points":
     entry_points={
         'console_scripts': [
-        	'webcam_node = ros2_webcam_AT.webcam_node:main',
-        	'april_tag_ids_node = ros2_webcam_AT.april_tag_ids_node:main',
+            'webcam_node = ros2_webcam_AT.webcam_node:main',
+            'april_tag_ids_node = ros2_webcam_AT.april_tag_ids_node:main',
+            'select_tag_node = ros2_webcam_AT.select_tag_node:main',
         ],
     },
     
@@ -30,5 +31,7 @@ run webcam publisher
 	ros2 run ros2_webcam_AT webcam_node --ros-args -p camera_index:=2	
 run aprilTag subscriber (with preview)
 	ros2 run ros2_webcam_AT april_tag_ids_node
+run aprilTag selecter publisher
+	ros2 run ros2_webcam_AT select_tag_node
 
 
