@@ -55,25 +55,25 @@ KNOWN_TAG_POSITIONS = {
     # Gripper tag at home pose: 9.5in forward, centered, 3.5in above base
     23: np.array([9.5 * 0.0254, 0.0, 3.5 * 0.0254]),
 
-    # Pickup zone (right side of robot)
+    # Pickup zone (LEFT of robot from behind, +y)
     # Tags 12, 24: x = 26in from base
     # Tags 10, 16: x = 41in from base
-    # Tags 12, 10: y = 4in to the right (-y)
-    # Tags 24, 16: y = 18in to the right (-y)
-    12: np.array([26.0 * 0.0254, -4.0 * 0.0254, CART_SURFACE_Z]),
-    24: np.array([26.0 * 0.0254, -18.0 * 0.0254, CART_SURFACE_Z]),
-    10: np.array([41.0 * 0.0254, -4.0 * 0.0254, CART_SURFACE_Z]),
-    16: np.array([41.0 * 0.0254, -18.0 * 0.0254, CART_SURFACE_Z]),
+    # Tags 12, 10: y = 4in to the left (+y)
+    # Tags 24, 16: y = 18in to the left (+y)
+    12: np.array([26.0 * 0.0254, 4.0 * 0.0254, CART_SURFACE_Z]),
+    24: np.array([26.0 * 0.0254, 18.0 * 0.0254, CART_SURFACE_Z]),
+    10: np.array([41.0 * 0.0254, 4.0 * 0.0254, CART_SURFACE_Z]),
+    16: np.array([41.0 * 0.0254, 18.0 * 0.0254, CART_SURFACE_Z]),
 
-    # Drop-off zone (left side of robot)
+    # Drop-off zone (RIGHT of robot from behind, -y)
     # Tags 15, 17: x = 26in from base
     # Tags 18, 19: x = 41in from base
-    # Tags 15, 18: y = 4in to the left (+y)
-    # Tags 17, 19: y = 18in to the left (+y)
-    15: np.array([26.0 * 0.0254, 4.0 * 0.0254, CART_SURFACE_Z]),
-    17: np.array([26.0 * 0.0254, 18.0 * 0.0254, CART_SURFACE_Z]),
-    18: np.array([41.0 * 0.0254, 4.0 * 0.0254, CART_SURFACE_Z]),
-    19: np.array([41.0 * 0.0254, 18.0 * 0.0254, CART_SURFACE_Z]),
+    # Tags 15, 18: y = 4in to the right (-y)
+    # Tags 17, 19: y = 18in to the right (-y)
+    15: np.array([26.0 * 0.0254, -4.0 * 0.0254, CART_SURFACE_Z]),
+    17: np.array([26.0 * 0.0254, -18.0 * 0.0254, CART_SURFACE_Z]),
+    18: np.array([41.0 * 0.0254, -4.0 * 0.0254, CART_SURFACE_Z]),
+    19: np.array([41.0 * 0.0254, -18.0 * 0.0254, CART_SURFACE_Z]),
 }
 
 # Tool tags sit slightly above cart surface
