@@ -62,26 +62,31 @@ class AprilTagIDsNode(Node):
         # convert image to openCV
         received_img = self.bridge.imgmsg_to_cv2(imageMessage)
 
-        # show image
-        cv2.imshow("Camera Video", received_img)
-        cv2.waitKey(1)
-
         # id april tags
         tags = self.at_detector.detect(cv2.cvtColor(received_img, cv2.COLOR_BGR2GRAY), estimate_tag_pose=True, camera_params=[self.fx, self.fy, self.cx, self.cy], tag_size=self.tag_size)
-        #self.get_logger().info(str(len(tags)))
-        
+
         self.ids = []
         self.center_xy = []
         self.pose_t = []
-        # this is in the format:
-        #  [x       [right to the camera when viewed from the camera's perspective    
-        #   y   =   down from the camera
-        #   z]      out of the camera]
         for i in range(len(tags)):
-            current_tag = tags[0]
+            current_tag = tags[i]
             self.ids.append(current_tag.tag_id)
             self.center_xy.append(current_tag.center)
             self.pose_t.append(current_tag.pose_t)
+
+            # Draw tag outline and ID on the preview
+            corners = current_tag.corners.astype(int)
+            for j in range(4):
+                pt1 = tuple(corners[j])
+                pt2 = tuple(corners[(j + 1) % 4])
+                cv2.line(received_img, pt1, pt2, (0, 255, 0), 2)
+            cx, cy = int(current_tag.center[0]), int(current_tag.center[1])
+            cv2.putText(received_img, f"ID:{current_tag.tag_id}", (cx - 20, cy - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+        # show annotated image
+        cv2.imshow("Camera Video", received_img)
+        cv2.waitKey(1)
 
 
     def listener_id(self, at_id):       

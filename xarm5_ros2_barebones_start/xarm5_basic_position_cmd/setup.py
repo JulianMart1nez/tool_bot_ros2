@@ -30,6 +30,7 @@ setup(
             'add_table_collision = xarm5_basic_position_cmd.add_table_collision:main',
             'grasp_pose_generator = xarm5_basic_position_cmd.grasp_pose_generator:main',
             'auto_home = xarm5_basic_position_cmd.auto_home:main',
+            'apriltag_perception = xarm5_basic_position_cmd.apriltag_perception:main',
         ],
     },
 )
