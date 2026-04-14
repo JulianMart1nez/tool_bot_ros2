@@ -49,8 +49,8 @@ TABLE_CENTER_X = -TABLE_SIZE_X / 2.0
 TABLE_CENTER_Y = 0.0
 TABLE_CENTER_Z = -0.00889 - TABLE_SIZE_Z / 2.0
 
-# Cart surface height: 2.35 in below link_base (adjusted from measurement)
-CART_TOP_Z = -2.35 * IN  # -0.05969 m
+# Cart surface height: 3.35 in below link_base (adjusted from measurement)
+CART_TOP_Z = -3.35 * IN  # -0.08509 m
 CART_HEIGHT = 31.0 * IN   # 0.7874 m
 CART_THICKNESS = 0.025     # model cart top as 2.5cm thick slab
 
