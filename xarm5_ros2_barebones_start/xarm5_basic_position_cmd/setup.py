@@ -31,6 +31,9 @@ setup(
             'grasp_pose_generator = xarm5_basic_position_cmd.grasp_pose_generator:main',
             'auto_home = xarm5_basic_position_cmd.auto_home:main',
             'apriltag_perception = xarm5_basic_position_cmd.apriltag_perception:main',
+            'gripper_depth_monitor = xarm5_basic_position_cmd.gripper_depth_monitor:main',
+            'fine_localization = xarm5_basic_position_cmd.fine_localization:main',
+            'test_descent = xarm5_basic_position_cmd.test_descent:main',
         ],
     },
 )

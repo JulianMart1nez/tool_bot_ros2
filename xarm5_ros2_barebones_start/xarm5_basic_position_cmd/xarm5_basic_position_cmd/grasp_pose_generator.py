@@ -37,8 +37,10 @@ from moveit_msgs.msg import (
 )
 from moveit_msgs.srv import GetPositionIK
 from control_msgs.action import GripperCommand
+from std_msgs.msg import Bool, Float32
 
 import threading
+import time
 
 
 TOOL_DOWN_QUAT = {'w': 0.0, 'x': 1.0, 'y': 0.0, 'z': 0.0}
@@ -72,6 +74,16 @@ class GraspPoseGenerator(Node):
         self.declare_parameter('move_speed', 0.3)
         self.declare_parameter('move_acc', 0.3)
 
+        # ── Depth-monitor parameters ─────────────────────────────────
+        self.declare_parameter('use_depth_monitor', True)
+        self.declare_parameter('descent_step_m', 0.005)       # 5mm per step
+        self.declare_parameter('slowdown_far_m', 0.040)       # full speed above 40mm
+        self.declare_parameter('slowdown_near_m', 0.010)      # crawl below 10mm
+        self.declare_parameter('stop_distance_m', 0.002)      # stop at 2mm
+        self.declare_parameter('descent_speed_full', 0.3)
+        self.declare_parameter('descent_speed_crawl', 0.05)
+        self.declare_parameter('safety_tolerance_m', 0.030)   # abort if measured vs expected differ by >30mm
+
         # ── Clients ──────────────────────────────────────────────────
         self.move_client = ActionClient(
             self, MoveGroup, MOVE_ACTION, callback_group=self.cb_group)
@@ -83,6 +95,30 @@ class GraspPoseGenerator(Node):
         # ── Subscriber ───────────────────────────────────────────────
         self.subscription = self.create_subscription(
             PoseStamped, '/tool_pose', self.tool_pose_callback, 10,
+            callback_group=self.cb_group)
+
+        # ── Depth monitor interface ──────────────────────────────────
+        self.depth_monitor_pub = self.create_publisher(
+            Bool, '/gripper/monitor_enabled', 10)
+        self._tool_distance = None
+        self._cart_distance = None
+        self.create_subscription(
+            Float32, '/gripper/tool_distance', self._tool_dist_cb, 10,
+            callback_group=self.cb_group)
+        self.create_subscription(
+            Float32, '/gripper/cart_distance', self._cart_dist_cb, 10,
+            callback_group=self.cb_group)
+
+        # ── Fine localization interface ──────────────────────────────
+        self.fine_loc_pub = self.create_publisher(
+            Bool, '/fine_loc/request', 10)
+        self._fine_loc_result = None
+        self._fine_loc_detected = None
+        self.create_subscription(
+            PoseStamped, '/fine_loc/result', self._fine_loc_result_cb, 10,
+            callback_group=self.cb_group)
+        self.create_subscription(
+            Bool, '/fine_loc/tag_detected', self._fine_loc_detected_cb, 10,
             callback_group=self.cb_group)
 
         self.busy = False
@@ -273,6 +309,159 @@ class GraspPoseGenerator(Node):
     def _close_gripper(self):
         return self._gripper(self._param('gripper_close_pos'), 'CLOSE')
 
+    # ── Fine localization callbacks ──────────────────────────────────
+
+    def _fine_loc_result_cb(self, msg):
+        self._fine_loc_result = msg
+
+    def _fine_loc_detected_cb(self, msg):
+        self._fine_loc_detected = msg.data
+
+    def _refine_pre_grasp(self, pre_grasp_pose):
+        """Request fine localization and adjust pre-grasp XY if a tag is found."""
+        self.get_logger().info('[FINE-LOC] Requesting fine localization...')
+        self._fine_loc_result = None
+        self._fine_loc_detected = None
+
+        msg = Bool()
+        msg.data = True
+        self.fine_loc_pub.publish(msg)
+
+        # Wait for result (up to 3 seconds)
+        for _ in range(30):
+            if self._fine_loc_detected is not None:
+                break
+            time.sleep(0.1)
+
+        if self._fine_loc_detected is None:
+            self.get_logger().warn('[FINE-LOC] Timed out — using coarse position.')
+            return pre_grasp_pose
+
+        if not self._fine_loc_detected:
+            self.get_logger().warn('[FINE-LOC] No tool tag detected — using coarse position.')
+            return pre_grasp_pose
+
+        if self._fine_loc_result is None:
+            self.get_logger().warn('[FINE-LOC] Detection succeeded but no result — using coarse position.')
+            return pre_grasp_pose
+
+        dx = self._fine_loc_result.pose.position.x
+        dy = self._fine_loc_result.pose.position.y
+
+        self.get_logger().info(
+            f'[FINE-LOC] Correction: dx={dx*1000:.1f}mm, dy={dy*1000:.1f}mm')
+
+        new_x = pre_grasp_pose.pose.position.x + dx
+        new_y = pre_grasp_pose.pose.position.y + dy
+        new_z = pre_grasp_pose.pose.position.z
+
+        self.get_logger().info(
+            f'[FINE-LOC] Adjusted pre-grasp: '
+            f'({pre_grasp_pose.pose.position.x:.4f}, {pre_grasp_pose.pose.position.y:.4f}) → '
+            f'({new_x:.4f}, {new_y:.4f})')
+
+        return self._make_pose(new_x, new_y, new_z)
+
+    # ── Depth monitor callbacks ─────────────────────────────────────
+
+    def _tool_dist_cb(self, msg):
+        self._tool_distance = msg.data
+
+    def _cart_dist_cb(self, msg):
+        self._cart_distance = msg.data
+
+    def _set_depth_monitor(self, enabled):
+        msg = Bool()
+        msg.data = enabled
+        self.depth_monitor_pub.publish(msg)
+        if enabled:
+            self._tool_distance = None
+            self._cart_distance = None
+            time.sleep(0.3)
+
+    def _get_descent_speed(self, distance_m):
+        far = self._param('slowdown_far_m')
+        near = self._param('slowdown_near_m')
+        full = self._param('descent_speed_full')
+        crawl = self._param('descent_speed_crawl')
+        if distance_m > far:
+            return full
+        if distance_m < near:
+            return crawl
+        ratio = (distance_m - near) / (far - near)
+        return crawl + ratio * (full - crawl)
+
+    def _closed_loop_descent(self, start_pose, target_z, label, use_tool_dist=True):
+        """Descend from start_pose to target_z using depth feedback for velocity scaling."""
+        if not self.get_parameter('use_depth_monitor').value:
+            pose = self._make_pose(
+                start_pose.pose.position.x,
+                start_pose.pose.position.y,
+                target_z)
+            return self._move_to_pose(pose, label)
+
+        self._set_depth_monitor(True)
+
+        step = self._param('descent_step_m')
+        stop_dist = self._param('stop_distance_m')
+        safety_tol = self._param('safety_tolerance_m')
+        current_z = start_pose.pose.position.z
+        x = start_pose.pose.position.x
+        y = start_pose.pose.position.y
+
+        self.get_logger().info(
+            f'[{label}] Closed-loop descent: z={current_z:.4f} → {target_z:.4f}m')
+
+        while current_z > target_z + 0.001:
+            dist = self._tool_distance if use_tool_dist else self._cart_distance
+
+            if dist is not None:
+                if dist <= stop_dist:
+                    self.get_logger().info(
+                        f'[{label}] Contact distance reached ({dist*1000:.1f}mm). Stopping.')
+                    break
+
+                speed = self._get_descent_speed(dist)
+                actual_step = min(step, dist - stop_dist)
+            else:
+                speed = self._param('descent_speed_crawl')
+                actual_step = step
+
+            next_z = max(target_z, current_z - actual_step)
+            pose = self._make_pose(x, y, next_z)
+
+            old_speed = self._param('move_speed')
+            old_acc = self._param('move_acc')
+            self.set_parameters([
+                rclpy.Parameter('move_speed', rclpy.Parameter.Type.DOUBLE, speed),
+                rclpy.Parameter('move_acc', rclpy.Parameter.Type.DOUBLE, speed),
+            ])
+
+            ok = self._move_to_pose(pose, f'{label}/z={next_z:.4f}')
+
+            self.set_parameters([
+                rclpy.Parameter('move_speed', rclpy.Parameter.Type.DOUBLE, old_speed),
+                rclpy.Parameter('move_acc', rclpy.Parameter.Type.DOUBLE, old_acc),
+            ])
+
+            if not ok:
+                self._set_depth_monitor(False)
+                return False
+
+            current_z = next_z
+
+            if dist is not None and self._cart_distance is not None:
+                expected_dist = current_z - target_z + stop_dist
+                measured = self._tool_distance if use_tool_dist else self._cart_distance
+                if measured is not None and abs(measured - expected_dist) > safety_tol:
+                    self.get_logger().warn(
+                        f'[{label}] Safety check: measured={measured*1000:.1f}mm, '
+                        f'expected≈{expected_dist*1000:.1f}mm (tol={safety_tol*1000:.0f}mm)')
+
+        self._set_depth_monitor(False)
+        self.get_logger().info(f'[{label}] Descent complete at z={current_z:.4f}m')
+        return True
+
     # ── Pick-and-place sequence ───────────────────────────────────────
 
     def tool_pose_callback(self, msg):
@@ -311,18 +500,33 @@ class GraspPoseGenerator(Node):
             f'    PRE-GRASP: ({tool_x:.3f}, {tool_y:.3f}, {grasp_z + approach_h:.3f})\n'
             f'    GRASP:     ({tool_x:.3f}, {tool_y:.3f}, {grasp_z:.3f})\n'
             f'    LIFT:      ({tool_x:.3f}, {tool_y:.3f}, {grasp_z + approach_h:.3f})\n'
+            f'    PRE-DROP:  ({drop_x:.3f}, {drop_y:.3f}, {drop_z + approach_h:.3f})\n'
             f'    DROP:      ({drop_x:.3f}, {drop_y:.3f}, {drop_z:.3f})\n'
             f'    RETREAT:   ({drop_x:.3f}, {drop_y:.3f}, {drop_z + approach_h:.3f})')
 
+        pre_drop = self._make_pose(drop_x, drop_y, drop_z + approach_h)
+
+        def _refine_and_descend():
+            refined = self._refine_pre_grasp(pre_grasp)
+            if refined.pose.position.x != pre_grasp.pose.position.x or \
+               refined.pose.position.y != pre_grasp.pose.position.y:
+                ok = self._move_to_pose(refined, 'REFINED-PRE-GRASP')
+                if not ok:
+                    return False
+            return self._closed_loop_descent(refined, grasp_z, 'GRASP',
+                                             use_tool_dist=True)
+
         steps = [
-            (self._open_gripper,                                   'Step 1: Open gripper'),
-            (lambda: self._move_to_pose(pre_grasp, 'PRE-GRASP'),  'Step 2: Pre-grasp'),
-            (lambda: self._move_to_pose(grasp, 'GRASP'),           'Step 3: Descend to grasp'),
-            (self._close_gripper,                                  'Step 4: Close gripper'),
-            (lambda: self._move_to_pose(lift, 'LIFT'),             'Step 5: Lift'),
-            (lambda: self._move_to_pose(drop, 'DROP'),             'Step 6: Move to drop'),
-            (self._open_gripper,                                   'Step 7: Release'),
-            (lambda: self._move_to_pose(retreat, 'RETREAT'),       'Step 8: Retreat'),
+            (self._open_gripper,                                                     'Step 1: Open gripper'),
+            (lambda: self._move_to_pose(pre_grasp, 'PRE-GRASP'),                    'Step 2: Pre-grasp (coarse)'),
+            (_refine_and_descend,                                                    'Step 3: Fine-loc + descend'),
+            (self._close_gripper,                                                    'Step 4: Close gripper'),
+            (lambda: self._move_to_pose(lift, 'LIFT'),                               'Step 5: Lift'),
+            (lambda: self._move_to_pose(pre_drop, 'PRE-DROP'),                       'Step 6: Move to pre-drop'),
+            (lambda: self._closed_loop_descent(pre_drop, drop_z, 'DROP',
+                                               use_tool_dist=False),                 'Step 7: Descend to drop'),
+            (self._open_gripper,                                                     'Step 8: Release'),
+            (lambda: self._move_to_pose(retreat, 'RETREAT'),                         'Step 9: Retreat'),
         ]
 
         for action, step_name in steps:
