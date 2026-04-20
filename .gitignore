@@ -49,3 +49,19 @@ qtcreator-*
 
 # Catkin custom files
 CATKIN_IGNORE
+
+# Colcon build artifacts (any workspace nested in the repo)
+install/
+log/
+**/install/
+**/log/
+**/build/
+
+# Python caches
+__pycache__/
+
+# Debug captures produced by detect_zone.py
+/tmp/detect_zone_debug/
+
+# Ad-hoc screenshots
+*.screenshot.png

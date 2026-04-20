@@ -96,9 +96,17 @@ def generate_launch_description():
         output='screen',
     )
 
+    detect_zone = Node(
+        package='xarm5_basic_position_cmd',
+        executable='detect_zone',
+        name='detect_zone',
+        output='screen',
+    )
+
     return LaunchDescription([
         realsense_node,
         camera_tf,
         depth_monitor,
         fine_loc,
+        detect_zone,
     ])

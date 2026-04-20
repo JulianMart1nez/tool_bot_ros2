@@ -7,25 +7,65 @@ This file orients Claude on how to work in this repo. Read it first.
 Autonomous tool pick-and-place on a UFactory xArm5 (5-DOF) + UFACTORY G2 gripper, ROS 2 Jazzy on Ubuntu 24.04. Tools are detected via AprilTags; trajectories are planned with TRAC-IK + MoveIt 2 / OMPL.
 
 - Robot IP: `192.168.1.234`
-- Driver workspace: `~/xarm_ws` (official `xarm_ros2`, NOT in this git)
-- App workspace (this repo): `~/ros2_ws/src/tool_bot_ros2`
+- Driver workspace: `~/xarm_ws` (official `xarm_ros2`, NOT in this repo)
+- App workspace (this repo): `~/tool_bot_ros2`
+- Voice-command package: `~/tool_bot_ros2/voice_command` (symlinked into `~/ros2_ws/src/voice_command` so `~/ros2_ws` still builds it)
 - Active branch: `julian_tracik_integration`
 
-## The two canonical launches
+## Architecture: single-camera, voice-driven
 
-**Real-robot stack (always this — never `*_fake.launch.py`):**
+The project has moved to a **single-camera architecture**. The overhead/scene USB webcam is no longer used for anything. All perception happens through the Intel RealSense D435i mounted on the gripper. Flow:
+
+1. User speaks a phrase like `"give me a hammer"` into the laptop microphone.
+2. `voice_command_node` transcribes (Google STT) and, when both a command phrase ("give me", "hand me", "grab", …) and a tool name appear in-order, publishes `std_msgs/String` on `/voice_command/tool_request` formatted as `"phrase=…|tool=…|fiducial=…"`.
+3. `detect_zone` receives the request and runs a scripted sequence:
+   - **Bird's-eye pose** — tall joint-space pose so both pickup and dropoff zones are visible.
+   - **Scan** — detect black-square-on-white-paper zone markers via morphological top-hat + ring/center contrast validation; group them into zones (k-means k=2 when ≥6 markers, single zone otherwise); label the wider one PICKUP.
+   - **Hover pose** — joint-space move to hover over the pickup zone.
+   - **Frame-center adjustment** — iteratively tweak J1 so the pickup centroid lands within 40 px of the image center.
+4. Fine AprilTag localization and descent happen next (still in progress — see "Next big step").
+
+### The three canonical launches
+
+**Robot stack (MoveIt 2 + controllers + collision scene):**
 ```
 ros2 launch xarm5_basic_position_cmd xarm5_moveit_with_table.launch.py robot_ip:=192.168.1.234 add_gripper:=true
 ```
-Brings up: `ufactory_driver`, `ros2_control` + `xarm5_traj_controller`, MoveIt 2, RViz, table+carts collision objects, auto-home.
 
-**Gripper-mounted depth camera + fine localization (separate terminal):**
+**Camera + detect_zone (V4L2 flavor — current, because `realsense2_camera` is not installed):**
 ```
-ros2 launch xarm5_basic_position_cmd depth_camera.launch.py
+ros2 launch xarm5_basic_position_cmd detect_zone.launch.py
 ```
-Brings up: RealSense D435i, static TF (`link_tcp → camera_link`), `gripper_depth_monitor`, `fine_localization`.
+Brings up `realsense_v4l2_pub` (RGB at 640×480 from `/dev/video10`) + `detect_zone`.
 
-## Phase status (2026-04-15)
+**Voice commands (laptop microphone):**
+```
+ros2 run voice_command voice_command_node
+```
+
+The older `depth_camera.launch.py` still exists for the future state where the `realsense2_camera` ROS 2 driver is installed (it brings up depth + gripper_depth_monitor + fine_localization + detect_zone together).
+
+## Hardware / physical constants
+
+- **Camera:** Intel RealSense D435i, mounted on gripper. Without `realsense2_camera`, accessed as V4L2 device `/dev/video10` (RGB only, no depth). D435i depth min range ≈ 190 mm when depth is available.
+- **Gripper:** UFACTORY G2, `drive_joint` 0 = open, 0.85 = closed.
+- **End-effector link:** `link_tcp` (172 mm below `link_eef`) with gripper attached.
+- **Safety z floor:** −0.085 m in `link_base`.
+- **Tool AprilTags** (tag36h11, **25 mm**): hammer=3, phillips=2, flathead=4. Gripper tag: **22**.
+- **Zone markers:** black squares on white paper (1in square, on white letter-size sheets). No AprilTags on zone corners. Detected by morphological top-hat + ring/center contrast (see `detect_zone.py:detect_zone_markers`).
+- **Zone dimensions:** Pickup 14.5 in × 15.5 in (wider). Dropoff 9.0 in × 15.5 in (narrower). In camera frame at bird's-eye: pickup = RIGHT, dropoff = LEFT.
+- **Carts:** Pickup cart LEFT (+y), 24 in × 18 in, near edge 18 in from base. Dropoff cart RIGHT (−y), 34 in × 17.5 in, near edge 18 in from base, 1.5 in rim. Cart surfaces at z ≈ −2.35 in below base. Cart height: 31 in. *(Cart surface z will be re-measured by user.)*
+
+## Key joint poses (degrees → radians in code)
+
+| Pose | J1 | J2 | J3 | J4 | J5 |
+|------|----|----|----|----|----|
+| Detect Zone (bird's-eye) | 0 | 0 | −160 | 145 | 0 |
+| Hover over Pickup | 23 | 23 | −130 | 107 | 23 |
+
+Defined in `detect_zone.py:DETECT_ZONE_JOINTS` / `HOVER_PICKUP_JOINTS`.
+
+## Phase status (2026-04-19)
 
 | Phase | Status | Notes |
 |-------|--------|-------|
@@ -34,49 +74,83 @@ Brings up: RealSense D435i, static TF (`link_tcp → camera_link`), `gripper_dep
 | 3 — TRAC-IK + combined launch | done | |
 | 4 — Reachability map | done | 97.3% reachable |
 | 5 — Grasp pose generator | done | |
-| 6 — Gripper integration | done | UFACTORY G2, drive_joint 0=open, 0.85=closed |
-| 7 — Closed-loop descent in grasp_pose_generator | done | |
-| 8 — AprilTag perception (overhead webcam) | done | Procrustes-calibrated |
-| 8b — Gripper depth-camera fine localization + descent test | **in progress, broken** | Direction logic wrong; bookmarked, rework with user |
+| 6 — Gripper integration | done | UFACTORY G2 |
+| 7 — Closed-loop descent | partial | rework bookmarked — see Phase 8b |
+| 8 — Overhead webcam AprilTag perception | **retired** | replaced by single-camera detect_zone |
+| 9 — Voice → detect_zone → hover → center | **done (this merge)** | end-to-end tested on real hardware |
+| 10 — AprilTag normal-vector descent + grasp | **next** | see design below |
+| 11 — Transfer to dropoff zone | future | |
 
-## Phase 8b — what exists and what's broken
+## Phase 9 — what exists now
 
-Files (all in `xarm5_ros2_barebones_start/xarm5_basic_position_cmd/`):
-- `launch/depth_camera.launch.py` — RealSense + static TF + depth monitor + fine_localization
-- `xarm5_basic_position_cmd/gripper_depth_monitor.py` — center-ROI tool distance, outer-ROI cart distance from `depth/image_rect_raw`
-- `xarm5_basic_position_cmd/fine_localization.py` — continuous tag36h11 detection, transformed via TF chain to `link_base`, published on `/fine_loc/result` (PoseStamped) and `/fine_loc/tag_detected` (Bool). `TAG_SIZE = 0.025` (25mm physical).
-- `xarm5_basic_position_cmd/test_descent.py` — manual: open gripper, fine-loc, staged refinement to tag XY, closed-loop descent with depth feedback + open-loop fallback below D435i min range.
+Files (under `xarm5_ros2_barebones_start/xarm5_basic_position_cmd/xarm5_basic_position_cmd/`):
 
-Static TF (depth_camera.launch.py:50): `link_tcp → camera_link`, x=−0.06985, y=0, z=0.127, pitch=−π/2.
+- `detect_zone.py` — the orchestrator. Subscribes to `/voice_command/tool_request` and `/gripper_cam/depth_camera/color/image_raw`, drives the bird's-eye → scan → hover → center sequence via MoveGroup joint-space planning. Saves per-step debug JPEGs (raw + annotated) under `/tmp/detect_zone_debug/<timestamp>_<tool>/`.
+- `realsense_v4l2_pub.py` — V4L2 fallback publisher. Opens the RealSense RGB stream via OpenCV, publishes `/gripper_cam/depth_camera/color/image_raw` and `/gripper_cam/depth_camera/color/camera_info` (with D435i factory intrinsics). Locks exposure + white balance to kill RGB flicker.
+- `apriltag_perception.py` — retained, but its overhead-camera Procrustes calibration was removed. The tool-tag detection pipeline still runs from the gripper camera; it feeds downstream localization.
+- `launch/detect_zone.launch.py` — brings up `realsense_v4l2_pub` + `detect_zone` together.
 
-**Known broken:** Live descent test drives the gripper in the *opposite* direction of the AprilTag, then drifts away during staged 20mm hops. The static-TF sign and rotation conventions need a fresh derivation with the user. **Do not iterate sign-by-sign on live runs.** See `.claude/skills/descent-test-debugging.md` for the full lessons learned.
+Voice-command package (now in this repo):
+
+- `voice_command/voice_command/voice_command_node.py` — uses `get_package_share_directory('voice_command')` to find `config/triggers.yaml` (previously used a broken `../..` path).
+- `voice_command/config/triggers.yaml` — command phrases + `{hammer:3, phillips:2, flathead:4}` mapping.
+
+Standalone debug tools (not nodes):
+
+- `realsense_preview.py` (repo root) — live viewer with the same zone-marker detection + AprilTag overlay. Useful for tuning without the full ROS stack.
+- `live_tag_viewer.py` (repo root) — older AprilTag-only viewer.
+
+### Where debug images land
+
+Every run of `detect_zone` creates `/tmp/detect_zone_debug/<YYYYMMDD_HHMMSS>_<tool>/` and saves step-indexed `*_raw.jpg` + `*_annotated.jpg` pairs:
+
+- `01_birdseye_arrived` — after reaching detect pose
+- `02_birdseye_scan_hit` / `_timeout` — during the initial scan
+- `03_hover_arrived` — after reaching hover pose
+- `04…_center_iterN_scan_…` / `_adjust` / `_DONE` / `_LOST` — per centering iteration
+- `*_FAIL_*` — any failure path
+
+Annotations: white crosshair at image center, yellow outlines on detected markers, green hull for PICKUP / orange for DROPOFF, offset in px for centering iterations. First place to look when a run misbehaves.
+
+## Next big step — AprilTag normal-vector descent (Phase 10)
+
+Once `detect_zone` has the gripper hovering over the pickup zone and the requested tool's AprilTag (ID 2/3/4, 25 mm) is in view, the arm needs to approach, align, and grasp it. The design the user specified:
+
+1. **Scan for the requested tag** (`dt_apriltags` on the gripper RGB stream, already wired up in `apriltag_perception.py` / `fine_localization.py`).
+2. **Build a perpendicular axis** — the world-frame normal vector emanating from the physical AprilTag plane. For a flat tool lying on the cart, this is just `+z` in `link_base` passing through the tag center XY. (When the tag isn't horizontal, derive from the tag's pose quaternion.)
+3. **Trace the TCP onto that axis** — move the gripper in XY so the camera's optical axis coincides with the tag-normal axis. This is a pure XY refinement above the current hover height: compute the tag's (x, y) in `link_base`, plan an IK-first joint-space move that brings `link_tcp` directly above it with the gripper's tool-down orientation (`_tool_aligned_quat(x, y)` — RPY = (π, 0, atan2(y, x))).
+4. **Descend along the axis** — vertical-only motion (z decreasing) while holding (x, y) constant. Use the observed AprilTag *pixel size* as a depth proxy: as the camera gets closer, the tag grows; stop descending once the tag reaches a pre-calibrated pixel size that corresponds to "gripper fingers are at grasp depth." This sidesteps the D435i 190 mm min depth range, which is why the earlier depth-based descent was broken.
+5. **Close gripper**, then **lift** straight up on the same axis to a safe transit height.
+6. **Transfer to dropoff** — plan a joint-space move to a Hover-over-Dropoff pose (to be added, mirror of `HOVER_PICKUP_JOINTS`), descend to release height, open gripper, retract.
+
+Design notes for whoever implements Phase 10:
+- IK-first planning is mandatory on this 5-DOF arm (see "Architectural conventions" below).
+- Use the 25 mm physical tag size and the D435i color intrinsics (fx=fy≈615, cx=320, cy=240 @ 640×480 — `realsense_v4l2_pub.py:60`) to convert pixel size → distance analytically: `distance ≈ fx * tag_size / pixel_size`.
+- Don't rely on depth-image feedback until `realsense2_camera` is installed. Until then the AprilTag pixel-size heuristic is the depth sensor.
+- The static TF `link_tcp → camera_link` (translation −0.06985, 0, 0.127; pitch −π/2) derived in `depth_camera.launch.py:50` is still the right mount geometry. Reuse it verbatim.
+- Live-robot iteration is expensive. Build the descent math *off-robot* first (static tag pose → planned waypoints → check with TF echo), then do a single dry run, then live.
 
 ## Architectural conventions worth remembering
 
 - **IK-first planning.** OMPL cannot sample valid goal states from raw Cartesian constraints on a 5-DOF arm. Always call `/compute_ik` (TRAC-IK) first, then plan in joint space against the returned joint values. This matches RViz's internal flow.
-- **5-DOF wrist yaw constraint.** At any (x, y), wrist yaw must equal `atan2(y, x)`. Use `_tool_aligned_quat(x, y)` (in `test_descent.py:152`) for every Cartesian goal — RPY = (π, 0, atan2(y, x)). Reusing the current TCP quat for a pose at a different XY produces sporadic NO_IK_SOLUTION (error_code −31) failures.
-- **End-effector link.** With gripper attached: use `link_tcp` (172mm below `link_eef`). Without: use `link_eef`.
-- **Disabled `avoid_collisions` in IK requests.** Necessary on this 5-DOF arm; MoveGroup planner still does collision checking. There is an inline comment — preserve it.
-- **TF chain for depth perception:** `link_base → … → link_tcp → camera_link → camera_color_optical_frame → tag pose`. The static TF link is `camera_link` (RealSense's default root) — anything else (e.g. `gripper_camera_link`) leaves the trees disconnected and `do_transform_point` silently fails.
+- **5-DOF wrist yaw constraint.** At any (x, y), wrist yaw must equal `atan2(y, x)`. Use `_tool_aligned_quat(x, y)` (`test_descent.py:152`) for every Cartesian goal — RPY = (π, 0, atan2(y, x)). Reusing the current TCP quat for a pose at a different XY produces sporadic NO_IK_SOLUTION (error_code −31) failures.
+- **End-effector link.** With gripper attached: `link_tcp` (172 mm below `link_eef`). Without: `link_eef`.
+- **Disabled `avoid_collisions` in IK requests.** Necessary on this 5-DOF arm; MoveGroup still does collision checking during planning. Preserve the inline comment explaining why.
+- **TF chain for depth perception:** `link_base → … → link_tcp → camera_link → camera_color_optical_frame → tag pose`. The static TF child link is `camera_link` (RealSense's default root) — anything else (e.g. `gripper_camera_link`) leaves the trees disconnected and `do_transform_point` silently fails.
 - **RealSense optical frame:** `+x right (image), +y down, +z forward (depth axis)`. Don't conflate with `camera_link` (`+x forward, +y left, +z up`).
 
-## Hardware / physical constants
+## Working style with the user
 
-- D435i depth min range ~190mm. Below `tcp_above_tool < 60mm`, switch to open-loop descent.
-- Safety z floor: −0.085m in `link_base`.
-- Tool tag IDs (tag36h11, **25mm** — different from the 2in workspace tags!): hammer=3, phillips=2, flathead=4. Pickup corners: 10/12/16/24. Dropoff corners: 15/17/18/19. Gripper tag: 23.
-- Pickup cart: LEFT (+y), 24in × 18in, near edge 18in from base. Dropoff cart: RIGHT (−y), 34in × 17.5in, near edge 18in from base, 1.5in rim. Cart surfaces at z ≈ −2.35in below base. Cart height: 31in.
-
-## Working style with Julian
-
-- Execute commands directly, don't hand the user instructions to run manually.
-- Commit and push to GitHub as work completes (Julian's explicit preference).
-- Confirm physical assumptions (tag size, mounting orientation) **before** live runs, not after.
-- Live-robot tests are the most expensive feedback loop in this project. Use static checks (TF echo, topic echo) first.
-- Between robot-stack relaunches, kill stale `robot_state_publisher` / `move_group` / `controller_manager` / `gripper_camera_tf` processes — leftovers conflict on TFs and topics.
+- Execute commands directly; don't hand the user scripts to run manually when they can be run here.
+- Commit and push to GitHub as work lands (explicit preference).
+- Confirm physical assumptions (tag size, mounting orientation, cart height) **before** live runs, not after.
+- Live-robot tests are the most expensive feedback loop in this project. Use static checks (TF echo, topic echo, the `/tmp/detect_zone_debug` JPEGs) first.
+- Between robot-stack relaunches, kill stale `robot_state_publisher` / `move_group` / `controller_manager` / `gripper_camera_tf` / `realsense_v4l2_pub` / `detect_zone` processes — leftovers conflict on TFs and topics, and old camera processes hold `/dev/video10`.
+- The user's laptop mic is the voice input (not the RealSense's array mic).
 
 ## Pointers to deeper context
 
-- `.claude/skills/descent-test-debugging.md` — full lessons-learned for the gripper depth camera + descent test (mistakes made, what worked, what to do next time).
-- `REACHABILITY_MAP.txt` — Phase 4 workspace coverage results.
-- The auto-memory at `~/.claude/projects/-home-julian-ros2-ws-src-tool-bot-ros2/memory/` carries cross-session context indexed in `MEMORY.md`.
+- `.claude/skills/descent-test-debugging.md` — lessons learned during the broken depth-based descent experiments (Phase 8b). Read before attempting Phase 10's descent math.
+- `REACHABILITY_MAP.txt` — Phase 4 workspace coverage.
+- `docs/detect_zone_example.png` — example bird's-eye capture with zones labeled.
+- Auto-memory at `~/.claude/projects/-home-logang/memory/` — cross-session context, indexed in `MEMORY.md`.

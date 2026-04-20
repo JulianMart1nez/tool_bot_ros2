@@ -1,0 +1,22 @@
+# =============================================================
+#  triggers.yaml  —  Tool Request Configuration
+#  Edit this file only. No code changes needed.
+# =============================================================
+
+# Phrases that must be spoken BEFORE a tool name to form a valid request.
+# These are matched as substrings, so multi-word phrases work fine.
+command_phrases:
+  - "hand me"
+  - "give me"
+  - "get me"
+  - "retrieve"
+  - "grab"
+
+# Tool names and their associated AprilTag IDs (tag36h11).
+# The tool word must appear AFTER the command phrase in the utterance.
+tools:
+  hammer:                3
+  phillips screwdriver:  2
+  flathead screwdriver:  4
+  phillips:              2
+  flathead:              4

@@ -1,0 +1,146 @@
+================================================================
+ VOICE COMMAND NODE — Instructions
+ Package: voice_command
+ Location: ~/ros2_ws/src/voice_command/
+ ROS 2 Jazzy | Ubuntu | Python
+================================================================
+
+
+----------------------------------------------------------------
+ WHAT THIS NODE DOES
+----------------------------------------------------------------
+Listens for spoken tool requests and publishes a result only
+when the speech contains BOTH:
+  1. A valid command phrase  (e.g. "hand me", "grab")
+  2. A valid tool name that follows it  (e.g. "hammer")
+
+Examples:
+  ACCEPTED: "hand me the hammer"     -> phrase=hand me|tool=hammer|fiducial=1
+  ACCEPTED: "give me a screwdriver"  -> phrase=give me|tool=screwdriver|fiducial=2
+  ACCEPTED: "grab the pliers"        -> phrase=grab|tool=pliers|fiducial=3
+  REJECTED: "hammer"                 -> no command phrase
+  REJECTED: "I like the hammer"      -> no command phrase
+  REJECTED: "retrieve"               -> no tool word after phrase
+
+
+----------------------------------------------------------------
+ PUBLISHED TOPICS
+----------------------------------------------------------------
+  /voice_command/raw_text      every recognised utterance (std_msgs/String)
+  /voice_command/tool_request  valid requests only        (std_msgs/String)
+                               format: phrase=grab|tool=hammer|fiducial=1
+
+
+----------------------------------------------------------------
+ EDITING TRIGGER WORDS  (no code changes needed)
+----------------------------------------------------------------
+Open this file:
+  ~/ros2_ws/src/voice_command/config/triggers.yaml
+
+To add a command phrase:
+  command_phrases:
+    - "hand me"
+    - "give me"
+    - "your new phrase here"   <-- add here
+
+To add a tool and fiducial ID:
+  tools:
+    hammer:      1
+    screwdriver: 2
+    your_tool:   4             <-- add here
+
+After editing triggers.yaml, rebuild and re-source (see below).
+
+
+----------------------------------------------------------------
+ INSTALL PYTHON DEPENDENCIES  (first time only)
+----------------------------------------------------------------
+  pip install SpeechRecognition pyyaml
+
+  # If pyaudio fails:
+  sudo apt install portaudio19-dev python3-pyaudio
+  pip install pyaudio
+
+
+----------------------------------------------------------------
+ BUILD
+----------------------------------------------------------------
+  source /opt/ros/jazzy/setup.bash
+  cd ~/ros2_ws
+  colcon build --packages-select voice_command
+  source install/setup.bash
+
+
+----------------------------------------------------------------
+ RUN
+----------------------------------------------------------------
+  # Launch with defaults:
+  ros2 launch voice_command voice_command.launch.py
+
+  # Override language or mic sensitivity:
+  ros2 launch voice_command voice_command.launch.py language:=en-GB energy_threshold:=400
+
+  # Or run directly:
+  ros2 run voice_command voice_command_node
+
+  # Point to triggers.yaml in the source folder (skip rebuild after edits):
+  ros2 run voice_command voice_command_node \
+    --ros-args -p config_file:=$HOME/ros2_ws/src/voice_command/config/triggers.yaml
+
+
+----------------------------------------------------------------
+ MONITOR OUTPUT  (separate terminal)
+----------------------------------------------------------------
+  source /opt/ros/jazzy/setup.bash
+  source ~/ros2_ws/install/setup.bash
+
+  ros2 topic echo /voice_command/tool_request
+  ros2 topic echo /voice_command/raw_text
+
+
+----------------------------------------------------------------
+ FILE STRUCTURE
+----------------------------------------------------------------
+  voice_command/
+  ├── config/
+  │   └── triggers.yaml          <- EDIT THIS to change words/tools
+  ├── launch/
+  │   └── voice_command.launch.py
+  ├── resource/
+  │   └── voice_command
+  ├── voice_command/
+  │   ├── __init__.py
+  │   └── voice_command_node.py  <- main node logic
+  ├── INSTRUCTIONS.txt           <- this file
+  ├── package.xml
+  ├── setup.cfg
+  └── setup.py
+
+
+----------------------------------------------------------------
+ PARAMETERS
+----------------------------------------------------------------
+  config_file      path to triggers.yaml  (default: package share)
+  language         STT language tag       (default: en-US)
+  energy_threshold mic sensitivity        (default: 300)
+                   increase if node hears too much background noise
+
+
+----------------------------------------------------------------
+ SWAPPING THE SPEECH BACKEND
+----------------------------------------------------------------
+To replace Google STT with Whisper, Vosk, or another engine,
+edit only the _transcribe() method in voice_command_node.py.
+Nothing else needs to change.
+
+
+----------------------------------------------------------------
+ NEXT STEPS / EXTENDING
+----------------------------------------------------------------
+- Add more tools in triggers.yaml
+- Subscribe to /voice_command/tool_request in another node
+  to trigger fiducial detection or robot motion
+- The fiducial ID in the message is what the next node should
+  use to search for the correct marker in the camera feed
+
+================================================================

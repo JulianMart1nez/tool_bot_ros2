@@ -34,6 +34,8 @@ setup(
             'gripper_depth_monitor = xarm5_basic_position_cmd.gripper_depth_monitor:main',
             'fine_localization = xarm5_basic_position_cmd.fine_localization:main',
             'test_descent = xarm5_basic_position_cmd.test_descent:main',
+            'detect_zone = xarm5_basic_position_cmd.detect_zone:main',
+            'realsense_v4l2_pub = xarm5_basic_position_cmd.realsense_v4l2_pub:main',
         ],
     },
 )
