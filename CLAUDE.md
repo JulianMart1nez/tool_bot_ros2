@@ -75,7 +75,7 @@ Run in its own terminal so the ↑/↓ keys can drive the descent. Auto-starts o
 
 Defined in `detect_zone.py:DETECT_ZONE_JOINTS` / `HOVER_PICKUP_JOINTS`.
 
-## Phase status (2026-04-19)
+## Phase status (2026-04-20)
 
 | Phase | Status | Notes |
 |-------|--------|-------|
@@ -88,9 +88,56 @@ Defined in `detect_zone.py:DETECT_ZONE_JOINTS` / `HOVER_PICKUP_JOINTS`.
 | 7 — Closed-loop descent | partial | rework bookmarked — see Phase 8b |
 | 8 — Overhead webcam AprilTag perception | **retired** | replaced by single-camera detect_zone |
 | 9 — Voice → detect_zone → hover → center | done | end-to-end tested on real hardware |
-| 10a — AprilTag align + keyboard trace-down | **done (this merge)** | `tool_approach.py`; no autonomous stop, no grasp yet |
-| 10b — Autonomous stop (depth + pixel-size) + grasp | next | needs `ros-jazzy-realsense2-camera` |
+| 10a — AprilTag align + keyboard trace-down | done | `tool_approach.py`; no autonomous stop, no grasp yet |
+| 10b — go_to continuous tracking + tag-acquire + grab-arming | **WIP — blocked on pose-correctness verification** | `go_to.py`; user reports arm wanders in wrong direction |
+| 10c — Autonomous stop + gripper close | next | depends on 10b trusted alignment |
 | 11 — Transfer to dropoff zone | future | |
+
+## Phase 10b — what's landed this session (2026-04-20)
+
+### New node: `go_to.py` (replaces `tool_approach.py` for the voice-driven path)
+- `ros2 run xarm5_basic_position_cmd go_to`
+- Subscribes: `/voice_command/tool_request`, `/voice_command/home_request`, `/detect_zone/complete`, and dynamically subscribes to `/fine_loc/tag_<fid>` + `/fine_loc/tag_<fid>/pixel_size` for the requested fiducial.
+- **Continuous XY tracking** (1.5 Hz): replans an IK + joint-space move to `(tag_x, tag_y, target_z)` whenever the smoothed tag XY shifts past `XY_DEADBAND_M = 0.015 m`. Keyboard ↓ lowers `target_z` by `STEP_M = 0.010 m`; the next tick re-plans with the new z.
+- **Pose smoothing + outlier reject**: running mean over `POSE_SMOOTH_N = 5` samples; any single pose more than `XY_JUMP_REJECT_M = 0.10 m` from the mean is dropped with a WARN log.
+- **Grab arming**: when `/fine_loc/tag_<fid>/pixel_size` lands within sweet_px ± 5 px for `GRAB_HOLD_TICKS = 3` consecutive samples, publishes `/tool_approach/grab` (nothing subscribes yet — actual gripper close is Phase 10c).
+- **Home via voice**: `/voice_command/home_request` triggers all-zero joint goal with WARN-level logging at every step (`HOME_REQUEST received` → `HOME thread started` → `HOME: planning` → `HOME: completed` or ERROR). CLI-bypass test: `ros2 topic pub --once /voice_command/home_request std_msgs/String "{data: cli}"`. Verified working end-to-end this session.
+- `ReentrantCallbackGroup` + `MultiThreadedExecutor(num_threads=4)` so the home callback can't be starved by tracking threads.
+
+### `detect_zone.py` — new post-hover "tag acquire" phase
+- After `_center_zone_in_frame('PICKUP')` succeeds, runs `_acquire_tag(fiducial_id)`:
+  1. Quick scan (10 frames) — is tag_<fid> visible?
+  2. If not, sweep J1 by −5°, +5°, −10°, +10°, −15°, +15° until the tag is found.
+  3. **No pixel-based joint nudging** — earlier attempt (`_center_tag_in_frame`) used a hand-tuned J1/J5 pixel nudge; user reported the arm moved "in nonsensical random directions", so we replaced it with visibility-gate-only. All XY alignment now happens in `go_to.py` using fine_localization's 3D link_base pose (which IS trustworthy through the TF chain).
+- Handoff payload `/detect_zone/complete` = `tool=…|fiducial=…|status={ok|zone_only|degraded}`.
+- Debug JPEGs: `acquire_tag<fid>_FOUND*.jpg` / `NOT_FOUND.jpg` in `/tmp/detect_zone_debug/<ts>_<tool>/`.
+
+### `debug_overlay.py` — image-only safety signals (no depth)
+- Published on `/debug/overlay`. Two signals: **SIZE** (measured tag edge px vs per-tool sweet size) and **ALIGN** (signed delta deg between tag's most-vertical edge pair and image vertical axis; rotate J5 by −ALIGN to correct).
+- Per-tool sweet sizes (calibrated from user screenshots at grabbable range): phillips:2 = 107.1 px, hammer:3 = 116.7 px, flathead:4 = 108.3 px (±5 px tol).
+- IN BAND badge green iff SIZE in band AND |ALIGN| ≤ 3°.
+
+### xArm firmware collision sensitivity
+- Enabled in `xarm5_moveit_with_table.launch.py` via `/xarm/set_collision_sensitivity data:3` at t=8 s. Scale 0–5 (0=off, 3=middle).
+- **Observed issue this session**: arm dropped to `state:2` (stopped/paused) with `err:0, warn:0` after a HOME, red LED on. May be collision-sensitivity false-trip. Recovery:
+  ```
+  ros2 service call /xarm/motion_enable xarm_msgs/srv/SetInt16ById "{id: 8, data: 1}"
+  ros2 service call /xarm/set_mode  xarm_msgs/srv/SetInt16 "{data: 1}"
+  ros2 service call /xarm/set_state xarm_msgs/srv/SetInt16 "{data: 0}"
+  ```
+  If this keeps happening, drop sensitivity 3 → 2 in `xarm5_moveit_with_table.launch.py`.
+
+### Open bug — TRACK moves arm in nonsensical direction
+Going into the new session: user reports even after acquiring the right tag, the arm "moves in a nonsensical way in a random direction" — not toward the tag's actual XY. Unverified hypothesis: `/fine_loc/tag_<id>` poses may have a TF mis-chain (wrong sign/axis swap). **First diagnostic step** in the next session should be:
+```
+# With arm at hover and tag visible:
+ros2 topic echo --once /fine_loc/tag_2
+ros2 run tf2_ros tf2_echo link_base link_tcp
+```
+Tag XY should be close to TCP XY (camera is directly above tag). If not → fix `fine_localization.py`, not `go_to.py`.
+
+### Canonical terminal launch (`~/Desktop/t*.sh`)
+`t1_robot.sh` → `t2_camera.sh` → `t3_voice.sh` → `t4_approach.sh` (`go_to`). `t5_camera_view.sh` opens `rqt_image_view /debug/overlay`. `t6_arm_monitor.sh` streams robot_states. `t7_camera_feeds.sh` = RGB + aligned_depth viewer.
 
 ## Phase 9 — what exists now
 

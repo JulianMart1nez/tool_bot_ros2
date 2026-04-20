@@ -233,6 +233,36 @@ def identify_zones(zones):
     return zones
 
 
+def _tag_vertical_angle(corners):
+    """Signed delta (deg) between the tag's most-vertical edge pair and the
+    image vertical axis. Mirrors debug_overlay.vertical_edge — rotating
+    J5 by -ang brings the tag's vertical edge parallel to image vertical.
+    """
+    c = corners
+    pairs = [(c[0], c[1], c[3], c[2]), (c[1], c[2], c[0], c[3])]
+    best = None
+    for p1a, p1b, p2a, p2b in pairs:
+        d1 = p1b - p1a
+        d2 = p2b - p2a
+        n1 = np.linalg.norm(d1)
+        n2 = np.linalg.norm(d2)
+        if n1 < 1e-3 or n2 < 1e-3:
+            continue
+        avg = d1 / n1 + d2 / n2
+        an = np.linalg.norm(avg)
+        if an < 1e-3:
+            continue
+        avg /= an
+        ang = math.degrees(math.atan2(avg[0], avg[1]))
+        if ang > 90.0:
+            ang -= 180.0
+        elif ang < -90.0:
+            ang += 180.0
+        if best is None or abs(ang) < abs(best):
+            best = ang
+    return float(best) if best is not None else 0.0
+
+
 # ── ROS2 Node ────────────────────────────────────────────────────────────
 
 class DetectZoneNode(Node):
@@ -437,24 +467,39 @@ class DetectZoneNode(Node):
 
             # Step 4: Center the zone in the camera frame by adjusting J1
             self.get_logger().info('Centering pickup zone in camera frame...')
-            centered = self._center_zone_in_frame('PICKUP')
+            zone_centered = self._center_zone_in_frame('PICKUP')
 
-            if not centered:
+            if not zone_centered:
                 self.get_logger().warn(
-                    'Could not fully center zone, proceeding with current position.')
+                    'Could not fully center zone, proceeding to tag-centering.')
                 self._save_debug('center_FAIL_or_timeout')
             else:
                 self._save_debug('center_success')
 
+            # Step 4b: Acquire (verify visibility of) the REQUESTED tool's
+            # AprilTag. We don't try to nudge joints to center it — the
+            # J1/J5 → pixel mapping isn't reliable enough open-loop, and
+            # go_to already does 3D-pose-based XY alignment via
+            # fine_localization (which IS reliable, since poses arrive
+            # in link_base through the calibrated TF chain).
             self.get_logger().info(
-                f'=== DETECT ZONE COMPLETE: ready for fine localization of {tool_name} ===')
+                f'=== Acquiring tool tag {fiducial_id} ({tool_name}) ===')
+            tag_locked = self._acquire_tag(fiducial_id)
+            if tag_locked:
+                self.get_logger().info(
+                    f'=== Tag {fiducial_id} in frame — handing off to go_to ===')
+            else:
+                self.get_logger().warn(
+                    f'Tag {fiducial_id} not acquired. Handing off anyway — '
+                    'go_to will wait for a pose.')
 
-            # Step 5: Hand off to tool_approach. Payload carries tool + fiducial
+            # Step 5: Hand off to go_to. Payload carries tool + fiducial
             # so the downstream node knows which /fine_loc/tag_<id> to track.
+            status = 'ok' if tag_locked else (
+                'zone_only' if zone_centered else 'degraded')
             complete_msg = String()
             complete_msg.data = (
-                f'tool={tool_name}|fiducial={fiducial_id}|'
-                f'status={"ok" if centered else "degraded"}')
+                f'tool={tool_name}|fiducial={fiducial_id}|status={status}')
             self.complete_pub.publish(complete_msg)
 
         except Exception as e:
@@ -592,6 +637,91 @@ class DetectZoneNode(Node):
             time.sleep(0.3)
 
         return False
+
+    # ── Per-tool tag acquisition (visibility gate, no joint nudging) ─
+
+    def _acquire_tag(self, fiducial_id):
+        """Ensure the requested tool's AprilTag is visible to the camera
+        before handoff.
+
+        Pixel-based joint nudges were giving unreliable results (J1/J5
+        directions depend on wrist pose in a way that's hard to calibrate
+        open-loop), so this function does NOT try to fine-align with
+        joint moves. It only:
+
+          1. Checks if tag_<fid> is visible in the current frame.
+          2. If not, sweeps J1 by ±15 deg in 3-deg steps looking for it.
+          3. If found, logs pixel location and returns True.
+          4. If never found, returns False (hand-off happens in degraded
+             mode and go_to will wait for a pose).
+
+        go_to's continuous tracker then uses /fine_loc/tag_<fid>'s 3D
+        pose in link_base to move the TCP over the tag — that path
+        is fully TF-calibrated, unlike open-loop pixel→joint nudges.
+        """
+        # Quick check: is it already visible?
+        found = self._find_tag(fiducial_id, max_attempts=10)
+        if found is not None:
+            tag_cx, tag_cy, ang_deg = found
+            self.get_logger().info(
+                f'[ACQUIRE] tag {fiducial_id} visible at '
+                f'({tag_cx:.0f},{tag_cy:.0f})px  ang={ang_deg:+.1f}deg. '
+                f'Handing off — go_to will track via 3D pose.')
+            self._save_debug(
+                f'acquire_tag{fiducial_id}_FOUND',
+                extra_text=f'@({tag_cx:.0f},{tag_cy:.0f}) ang={ang_deg:+.1f}')
+            return True
+
+        # Not visible — do a small J1 sweep to try to bring it into view.
+        self.get_logger().warn(
+            f'[ACQUIRE] tag {fiducial_id} not in initial frame — sweeping J1.')
+        sweep = dict(HOVER_PICKUP_JOINTS)
+        base_j1 = sweep['joint1']
+        for delta_deg in (-5, +5, -10, +10, -15, +15):
+            sweep['joint1'] = base_j1 + math.radians(delta_deg)
+            if not self._move_to_joint_pose(
+                    sweep, f'ACQUIRE-sweep-{delta_deg:+d}'):
+                continue
+            time.sleep(0.3)
+            found = self._find_tag(fiducial_id, max_attempts=8)
+            if found is not None:
+                tag_cx, tag_cy, ang_deg = found
+                self.get_logger().info(
+                    f'[ACQUIRE] tag {fiducial_id} FOUND after J1{delta_deg:+d}deg '
+                    f'@({tag_cx:.0f},{tag_cy:.0f})px. Handing off.')
+                HOVER_PICKUP_JOINTS['joint1'] = sweep['joint1']
+                self._save_debug(
+                    f'acquire_tag{fiducial_id}_FOUND_after_sweep',
+                    extra_text=f'J1{delta_deg:+d}deg')
+                return True
+
+        # Restore original hover pose and bail.
+        sweep['joint1'] = base_j1
+        self._move_to_joint_pose(sweep, 'ACQUIRE-restore')
+        self.get_logger().warn(
+            f'[ACQUIRE] tag {fiducial_id} NOT FOUND after ±15deg J1 sweep. '
+            'Handing off in degraded mode.')
+        self._save_debug(f'acquire_tag{fiducial_id}_NOT_FOUND')
+        return False
+
+    def _find_tag(self, fiducial_id, max_attempts=10):
+        """Scan up to max_attempts camera frames for tag_id==fiducial_id.
+        Returns (cx, cy, ang_deg) on first hit, else None."""
+        for _ in range(max_attempts):
+            gray = self._get_frame_gray()
+            if gray is None:
+                time.sleep(0.1)
+                continue
+            tags = self.detector.detect(gray, estimate_tag_pose=False)
+            for t in tags:
+                if int(t.tag_id) != fiducial_id:
+                    continue
+                corners = np.asarray(t.corners, dtype=np.float32)
+                center = corners.mean(axis=0)
+                ang = _tag_vertical_angle(corners)
+                return float(center[0]), float(center[1]), ang
+            time.sleep(0.1)
+        return None
 
     # ── Joint-space motion ───────────────────────────────────────────
 

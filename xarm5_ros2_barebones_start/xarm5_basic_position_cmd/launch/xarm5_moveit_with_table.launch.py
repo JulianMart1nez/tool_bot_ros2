@@ -21,6 +21,7 @@ Startup sequence:
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     IncludeLaunchDescription,
     TimerAction,
 )
@@ -59,6 +60,22 @@ def generate_launch_description():
         }.items(),
     )
 
+    # 1b. Enable on-arm collision detection (firmware-level torque-deviation
+    #     trip). Scale 0-5: 0=off, 1=least sensitive, 5=most sensitive.
+    #     3 is the recommended middle ground — catches a table strike with
+    #     the gripper without false-tripping on normal motion. Wait until
+    #     the driver service is up.
+    set_collision = ExecuteProcess(
+        cmd=[
+            'ros2', 'service', 'call',
+            '/xarm/set_collision_sensitivity',
+            'xarm_msgs/srv/SetInt16',
+            '{data: 3}',
+        ],
+        output='screen',
+    )
+    delayed_set_collision = TimerAction(period=8.0, actions=[set_collision])
+
     # 2. Add table collision object (after MoveIt is ready)
     add_table = Node(
         package='xarm5_basic_position_cmd',
@@ -81,6 +98,7 @@ def generate_launch_description():
         robot_ip_arg,
         add_gripper_arg,
         moveit_stack,
+        delayed_set_collision,
         delayed_add_table,
         delayed_auto_home,
     ])

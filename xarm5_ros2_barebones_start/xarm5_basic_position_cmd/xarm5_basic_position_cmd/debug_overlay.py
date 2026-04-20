@@ -2,15 +2,18 @@
 """
 debug_overlay.py
 ----------------
-Read-only diagnostic viewer. Subscribes to the gripper RGB stream and
-overlays EXACTLY what the perception stack is trying to recognize:
-  - Zone markers (black-square-on-white-paper, morph top-hat + ring contrast).
-  - AprilTags (tag36h11, IDs 2/3/4 for tools, 22 for gripper).
-  - HUD text with detection counts.
+Read-only diagnostic viewer. Two image-only safety signals — no depth.
 
-Publishes an annotated BGR image on /debug/overlay so rqt_image_view
-on that topic shows live what the detector sees. Does NOT send motion
-goals, does NOT modify detect_zone or fine_localization.
+  1) SIZE   — measured tag edge length in px vs the per-tool grabbable
+              sweet size (+/- tol). Phillips/hammer/flathead each have
+              their own sweet size because the tools sit at slightly
+              different heights on the cart.
+  2) ALIGN  — angle (deg) between the tag's most-vertical edge pair and
+              the image vertical axis. Drives a J5 rotation correction:
+              rotate J5 by ALIGN to bring the tag's vertical edge
+              parallel to the camera-frame vertical axis.
+
+Both must agree (SIZE in band AND |ALIGN| <= tol) for IN BAND.
 """
 
 import cv2
@@ -25,79 +28,88 @@ from sensor_msgs.msg import Image
 import dt_apriltags
 
 
-TOOL_TAGS = {2: 'phillips', 3: 'hammer', 4: 'flathead'}
+# Per-tool sweet size in px at the grabbable range, +/- TOL.
+SWEET_PX = {
+    2: 107.1,   # phillips
+    3: 116.7,   # hammer
+    4: 108.3,   # flathead
+}
+TOOL_NAMES = {2: 'phillips', 3: 'hammer', 4: 'flathead'}
 GRIPPER_TAG = 22
-IMG_TOPIC = '/gripper_cam/depth_camera/color/image_raw'
+RGB_TOPIC = '/gripper_cam/depth_camera/color/image_raw'
 OUT_TOPIC = '/debug/overlay'
 
 
-def detect_zone_markers(gray):
-    """Mirror of detect_zone.py:detect_zone_markers (read-only copy)."""
-    tophat_k = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
-    tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, tophat_k)
-    _, bright = cv2.threshold(tophat, 25, 255, cv2.THRESH_BINARY)
-    clean_k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, clean_k, iterations=2)
-    bright = cv2.morphologyEx(bright, cv2.MORPH_OPEN, clean_k, iterations=1)
+def vertical_edge(corners):
+    """Pick the tag's most-vertical pair of parallel edges and return a line
+    that runs THROUGH the tag center, PARALLEL to those edges (not the line
+    connecting their midpoints — that one is perpendicular).
 
-    contours, _ = cv2.findContours(
-        bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    Returns:
+        angle_deg  — signed delta from image vertical, in [-90, 90]
+        center     — (cx, cy) tag centroid in image
+        dir_unit   — unit vector along the line direction
+    """
+    c = corners.astype(np.float32)
+    pairs = [
+        (c[0], c[1], c[3], c[2]),  # bottom + top edges
+        (c[1], c[2], c[0], c[3]),  # right + left edges
+    ]
+    center = c.mean(axis=0)
+    best = None
+    for p1a, p1b, p2a, p2b in pairs:
+        d1 = p1b - p1a
+        d2 = p2b - p2a
+        n1 = np.linalg.norm(d1)
+        n2 = np.linalg.norm(d2)
+        if n1 < 1e-3 or n2 < 1e-3:
+            continue
+        # Average direction of the two parallel edges (handles slight
+        # perspective skew). Then normalise.
+        avg = d1 / n1 + d2 / n2
+        an = np.linalg.norm(avg)
+        if an < 1e-3:
+            continue
+        avg /= an
+        # Signed angle from image vertical axis (image y-axis points down).
+        ang = np.degrees(np.arctan2(avg[0], avg[1]))
+        # Fold to [-90, 90] — line orientation, not edge direction.
+        if ang > 90.0:
+            ang -= 180.0
+        elif ang < -90.0:
+            ang += 180.0
+        if best is None or abs(ang) < abs(best[0]):
+            best = (float(ang), center, avg)
+    return best
 
-    markers = []
-    for c in contours:
-        area = cv2.contourArea(c)
-        if area < 100 or area > 5000:
-            continue
-        peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.05 * peri, True)
-        x, y, w, h = cv2.boundingRect(c)
-        aspect = float(w) / h if h > 0 else 0
-        if aspect < 0.4 or aspect > 2.5:
-            continue
-        M = cv2.moments(c)
-        if M['m00'] == 0:
-            continue
-        cx = int(M['m10'] / M['m00'])
-        cy = int(M['m01'] / M['m00'])
-        r_inner = max(w, h) // 4
-        r_outer = max(w, h) // 2
-        if r_inner < 2 or r_outer < 4:
-            continue
-        ys = np.arange(max(0, cy - r_outer), min(gray.shape[0], cy + r_outer + 1))
-        xs = np.arange(max(0, cx - r_outer), min(gray.shape[1], cx + r_outer + 1))
-        if len(ys) == 0 or len(xs) == 0:
-            continue
-        yg, xg = np.meshgrid(ys, xs, indexing='ij')
-        dist = np.sqrt((xg - cx) ** 2 + (yg - cy) ** 2)
-        roi = gray[max(0, cy - r_outer):min(gray.shape[0], cy + r_outer + 1),
-                   max(0, cx - r_outer):min(gray.shape[1], cx + r_outer + 1)]
-        if roi.shape != dist.shape:
-            continue
-        center_pixels = roi[dist < r_inner]
-        ring_pixels = roi[(dist >= r_inner) & (dist < r_outer)]
-        if len(center_pixels) < 3 or len(ring_pixels) < 3:
-            continue
-        if ring_pixels.mean() - center_pixels.mean() > 15:
-            markers.append({
-                'center': (cx, cy),
-                'corners': approx.reshape(-1, 2),
-            })
-    return markers
+
+def extend_line(center, dir_unit, length):
+    """Return endpoints of a segment of `length`, centered on `center`,
+    along `dir_unit`."""
+    half = (length / 2.0) * dir_unit
+    return center - half, center + half
 
 
 class DebugOverlay(Node):
 
     def __init__(self):
         super().__init__('debug_overlay')
+        self.declare_parameter('sweet_tol_px', 5.0)
+        self.declare_parameter('align_tol_deg', 3.0)
+        self.tol_px = float(self.get_parameter('sweet_tol_px').value)
+        self.tol_deg = float(self.get_parameter('align_tol_deg').value)
+
         self.bridge = CvBridge()
         self.detector = dt_apriltags.Detector(
             families='tag36h11', nthreads=2, quad_decimate=1.0,
             quad_sigma=0.0, refine_edges=1, decode_sharpening=0.25)
 
-        self.sub = self.create_subscription(Image, IMG_TOPIC, self._cb, 10)
+        self.create_subscription(Image, RGB_TOPIC, self._cb, 10)
         self.pub = self.create_publisher(Image, OUT_TOPIC, 5)
+
         self.get_logger().info(
-            f'debug_overlay: subscribed {IMG_TOPIC} → publishing {OUT_TOPIC}')
+            f'debug_overlay: sweet_px={SWEET_PX}  tol={self.tol_px}px  '
+            f'align_tol={self.tol_deg}deg')
 
     def _cb(self, msg):
         try:
@@ -106,40 +118,100 @@ class DebugOverlay(Node):
             self.get_logger().warn(f'cv_bridge: {e}')
             return
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-
-        # Zone markers (yellow outlines + center dot)
-        markers = detect_zone_markers(gray)
-        for m in markers:
-            cv2.polylines(bgr, [m['corners'].astype(np.int32)], True,
-                          (0, 255, 255), 2)
-            cx, cy = m['center']
-            cv2.circle(bgr, (cx, cy), 3, (0, 255, 255), -1)
-
-        # AprilTags (green box + big ID label, red for unknown ID)
-        tags = self.detector.detect(gray, estimate_tag_pose=False)
-        for t in tags:
-            pts = np.int32(t.corners).reshape(-1, 2)
-            tid = int(t.tag_id)
-            known = tid in TOOL_TAGS or tid == GRIPPER_TAG
-            color = (0, 255, 0) if known else (0, 0, 255)
-            cv2.polylines(bgr, [pts], True, color, 2)
-            cx, cy = int(t.center[0]), int(t.center[1])
-            cv2.circle(bgr, (cx, cy), 4, color, -1)
-            label = f'{TOOL_TAGS.get(tid, "gripper" if tid == GRIPPER_TAG else "?")}:{tid}'
-            cv2.putText(bgr, label, (cx + 6, cy - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-        # HUD
         h, w = bgr.shape[:2]
-        cv2.drawMarker(bgr, (w // 2, h // 2), (255, 255, 255),
-                       cv2.MARKER_CROSS, 14, 1)
-        tool_hits = [t.tag_id for t in tags if t.tag_id in TOOL_TAGS]
-        hud = (f'zones_markers:{len(markers)}  apriltags:{len(tags)}  '
-               f'tool_hits:{tool_hits}')
-        cv2.putText(bgr, hud, (8, 22), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55, (0, 0, 0), 3)
-        cv2.putText(bgr, hud, (8, 22), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55, (255, 255, 255), 1)
+        cx_img, cy_img = w // 2, h // 2
+
+        tags = self.detector.detect(gray, estimate_tag_pose=False)
+
+        # Pick first detected tool tag (priority: phillips, hammer, flathead).
+        tool_pick = None
+        for prefer in (2, 3, 4):
+            for t in tags:
+                if int(t.tag_id) == prefer:
+                    tool_pick = t
+                    break
+            if tool_pick is not None:
+                break
+
+        # Outline every detected tag. Colour by status if it's the picked tool.
+        size_ok = False
+        align_ok = False
+        edge_px = None
+        ang_deg = None
+        for t in tags:
+            tid = int(t.tag_id)
+            pts = np.int32(t.corners).reshape(-1, 2)
+            if tool_pick is not None and t is tool_pick:
+                e = float(np.mean([
+                    np.linalg.norm(t.corners[i] - t.corners[(i + 1) % 4])
+                    for i in range(4)]))
+                edge_px = e
+                sweet = SWEET_PX[tid]
+                size_ok = abs(e - sweet) <= self.tol_px
+                ve = vertical_edge(t.corners)
+                if ve is not None:
+                    ang_deg = ve[0]
+                    align_ok = abs(ang_deg) <= self.tol_deg
+                col = (0, 255, 0) if (size_ok and align_ok) else (0, 165, 255)
+            elif tid == GRIPPER_TAG:
+                col = (255, 200, 0)
+            elif tid in TOOL_NAMES:
+                col = (0, 200, 200)
+            else:
+                col = (0, 0, 255)
+            cv2.polylines(bgr, [pts], True, col, 2)
+
+        # --- ALIGN guide: image vertical reference + tag-vertical line ---
+        # Image vertical reference (full height, dashed white).
+        for y in range(0, h, 14):
+            cv2.line(bgr, (cx_img, y), (cx_img, min(h, y + 7)),
+                     (255, 255, 255), 1)
+
+        if tool_pick is not None and ang_deg is not None:
+            ve = vertical_edge(tool_pick.corners)
+            if ve is not None:
+                _, ctr, dir_unit = ve
+                a, b = extend_line(ctr, dir_unit, length=max(h, w))
+                col = (0, 255, 0) if align_ok else (0, 165, 255)
+                cv2.line(bgr,
+                         (int(round(a[0])), int(round(a[1]))),
+                         (int(round(b[0])), int(round(b[1]))),
+                         col, 2)
+                tcx = int(tool_pick.center[0])
+                tcy = int(tool_pick.center[1])
+                cv2.circle(bgr, (tcx, tcy), 4, col, -1)
+
+        # --- HUD readouts (top-left big plate) -------------------------
+        cv2.rectangle(bgr, (0, 0), (w, 70), (0, 0, 0), -1)
+        if tool_pick is None:
+            line1 = 'SIZE : --- px  (no tool tag in view)'
+            line2 = 'ALIGN: --- deg'
+            c1 = c2 = (0, 0, 255)
+        else:
+            tid = int(tool_pick.tag_id)
+            sweet = SWEET_PX[tid]
+            delta = edge_px - sweet
+            sign = '+' if delta >= 0 else '-'
+            line1 = (f'SIZE : {TOOL_NAMES[tid]}:{tid}  '
+                     f'{edge_px:5.1f} px  (sweet {sweet:.1f} '
+                     f'{sign}{abs(delta):4.1f} / tol {self.tol_px:.1f})')
+            c1 = (0, 255, 0) if size_ok else (0, 165, 255)
+            line2 = (f'ALIGN: {ang_deg:+5.1f} deg  '
+                     f'(rotate J5 by {-ang_deg:+5.1f} deg / tol {self.tol_deg:.1f})')
+            c2 = (0, 255, 0) if align_ok else (0, 165, 255)
+
+        cv2.putText(bgr, line1, (10, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, c1, 2)
+        cv2.putText(bgr, line2, (10, 58),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, c2, 2)
+
+        # GO/NO-GO badge (upper-right)
+        ok = size_ok and align_ok and tool_pick is not None
+        badge = 'IN BAND' if ok else 'WAIT'
+        bcol = (0, 255, 0) if ok else (0, 165, 255)
+        cv2.rectangle(bgr, (w - 130, 10), (w - 10, 60), (0, 0, 0), -1)
+        cv2.putText(bgr, badge, (w - 122, 45),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, bcol, 2)
 
         out = self.bridge.cv2_to_imgmsg(bgr, 'bgr8')
         out.header = msg.header
