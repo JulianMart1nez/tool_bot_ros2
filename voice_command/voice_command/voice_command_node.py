@@ -59,11 +59,13 @@ class VoiceCommandNode(Node):
         # ── Load config ──────────────────────────────────────────────────────
         self.command_phrases: list[str] = []   # e.g. ["hand me", "grab"]
         self.tools: dict[str, int] = {}        # e.g. {"hammer": 1}
+        self.home_phrases: list[str] = []      # e.g. ["go home"]
         self._load_config(config_path)
 
         # ── Publishers ───────────────────────────────────────────────────────
         self.pub_raw     = self.create_publisher(String, 'voice_command/raw_text',     10)
         self.pub_request = self.create_publisher(String, 'voice_command/tool_request', 10)
+        self.pub_home    = self.create_publisher(String, 'voice_command/home_request', 10)
 
         # ── Microphone setup ─────────────────────────────────────────────────
         self.recogniser = sr.Recognizer()
@@ -96,10 +98,12 @@ class VoiceCommandNode(Node):
                 str(k).lower(): int(v)
                 for k, v in (data.get('tools') or {}).items()
             }
+            self.home_phrases = [p.lower() for p in (data.get('home_phrases') or [])]
 
             self.get_logger().info(
                 f'Loaded {len(self.command_phrases)} command phrase(s), '
-                f'{len(self.tools)} tool(s) from: {path}'
+                f'{len(self.tools)} tool(s), '
+                f'{len(self.home_phrases)} home phrase(s) from: {path}'
             )
         except FileNotFoundError:
             self.get_logger().error(f'Config file not found: {path}')
@@ -115,6 +119,17 @@ class VoiceCommandNode(Node):
 
         self.get_logger().info(f'Heard: "{text}"')
         self.pub_raw.publish(String(data=text))
+
+        normalized = re.sub(r"[^\w\s]", "", text.lower())
+
+        # Home request takes priority over tool request so "go home"
+        # never gets mis-parsed as a tool name.
+        for phrase in self.home_phrases:
+            if phrase in normalized:
+                payload = f'phrase={phrase}'
+                self.pub_home.publish(String(data=payload))
+                self.get_logger().info(f'Home request — {payload}')
+                return
 
         result = self._parse_request(text)
 

@@ -36,6 +36,10 @@ setup(
             'test_descent = xarm5_basic_position_cmd.test_descent:main',
             'detect_zone = xarm5_basic_position_cmd.detect_zone:main',
             'realsense_v4l2_pub = xarm5_basic_position_cmd.realsense_v4l2_pub:main',
+            'tool_approach = xarm5_basic_position_cmd.tool_approach:main',
+            'arm_pose_monitor = xarm5_basic_position_cmd.arm_pose_monitor:main',
+            'go_to = xarm5_basic_position_cmd.go_to:main',
+            'debug_overlay = xarm5_basic_position_cmd.debug_overlay:main',
         ],
     },
 )

@@ -277,6 +277,7 @@ class DetectZoneNode(Node):
 
         # ── Publishers ───────────────────────────────────────────────
         self.tool_pose_pub = self.create_publisher(PoseStamped, '/tool_pose', 10)
+        self.complete_pub = self.create_publisher(String, '/detect_zone/complete', 10)
 
         # ── Action client for MoveGroup ──────────────────────────────
         self.move_client = ActionClient(
@@ -448,9 +449,13 @@ class DetectZoneNode(Node):
             self.get_logger().info(
                 f'=== DETECT ZONE COMPLETE: ready for fine localization of {tool_name} ===')
 
-            # Step 5: Hand off — publish a signal that zone is acquired
-            # The fine_localization node is already running and will detect
-            # the tool AprilTag from this hover position.
+            # Step 5: Hand off to tool_approach. Payload carries tool + fiducial
+            # so the downstream node knows which /fine_loc/tag_<id> to track.
+            complete_msg = String()
+            complete_msg.data = (
+                f'tool={tool_name}|fiducial={fiducial_id}|'
+                f'status={"ok" if centered else "degraded"}')
+            self.complete_pub.publish(complete_msg)
 
         except Exception as e:
             self.get_logger().error(f'Detect sequence failed: {e}')

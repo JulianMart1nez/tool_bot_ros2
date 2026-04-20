@@ -12,6 +12,15 @@ command_phrases:
   - "retrieve"
   - "grab"
 
+# Phrases that trigger a "go home" / reset request. Matched as substrings
+# anywhere in the utterance. Published on /voice_command/home_request.
+home_phrases:
+  - "go home"
+  - "home position"
+  - "initial position"
+  - "reset position"
+  - "return home"
+
 # Tool names and their associated AprilTag IDs (tag36h11).
 # The tool word must appear AFTER the command phrase in the utterance.
 tools:

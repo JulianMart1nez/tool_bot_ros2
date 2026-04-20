@@ -1,9 +1,23 @@
 """
-Launch RealSense D435i depth camera + gripper depth monitor node.
+depth_camera.launch.py — primary camera + perception launch (realsense2_camera flavor).
 
-Starts the RealSense ROS 2 node with depth and color streams,
-applies decimation + temporal filters, and publishes a static
-transform from the gripper TCP to the camera frame.
+Starts:
+  - realsense2_camera_node: D435i depth + color streams, with
+    align_depth enabled so depth is resampled into the color image grid
+    (needed by fine_localization to read depth at a tag's pixel location).
+  - gripper_camera_tf: static TF link_tcp → camera_link. The rest of the
+    camera TF tree (camera_link → camera_color_optical_frame, etc.) is
+    published by the driver.
+  - detect_zone: voice-driven bird's-eye → scan → hover → center sequence.
+  - fine_localization: per-tag 6-DOF pose + depth sampled at the tag
+    center (published on /fine_loc/tag_<id>/depth).
+  - gripper_depth_monitor: legacy image-center depth monitor used by
+    test_descent. Still handy for closed-loop depth experiments.
+
+tool_approach is NOT launched here — run it in its own terminal so the
+keyboard ↑/↓ trace-down interface has a live TTY:
+
+    ros2 run xarm5_basic_position_cmd tool_approach
 
 Usage:
   ros2 launch xarm5_basic_position_cmd depth_camera.launch.py
@@ -29,6 +43,11 @@ def generate_launch_description():
             'enable_accel': False,
             'depth_module.depth_profile': '640,480,30',
             'rgb_camera.color_profile': '640,480,30',
+            # align_depth republishes depth resampled onto the color image
+            # grid, so we can sample depth at a tag's (u,v) pixel from the
+            # RGB detection directly. Published as
+            # /gripper_cam/depth_camera/aligned_depth_to_color/image_raw
+            'align_depth.enable': True,
             'decimation_filter.enable': True,
             'decimation_filter.filter_magnitude': 2,
             'temporal_filter.enable': True,
@@ -52,15 +71,11 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='gripper_camera_tf',
         arguments=[
-            '--x', '-0.06985',    # camera body 2.75in along link_tcp -x
-                                  # (when tool-down this maps to link_base +x,
-                                  # i.e. away from the base — matches the
-                                  # physical mounting where the lens faces
-                                  # away from the base).
-            '--y', '0.0',         # centered
-            '--z', '0.127',       # 5in above TCP midpoint
+            '--x', '-0.06985',
+            '--y', '0.0',
+            '--z', '0.127',
             '--roll', '0.0',
-            '--pitch', '-1.5707963',  # -π/2 → camera looks along TCP +z
+            '--pitch', '-1.5707963',
             '--yaw', '0.0',
             '--frame-id', 'link_tcp',
             '--child-frame-id', 'camera_link',
@@ -89,9 +104,14 @@ def generate_launch_description():
         package='xarm5_basic_position_cmd',
         executable='fine_localization',
         name='fine_localization',
+        parameters=[{
+            'enable_depth': True,
+        }],
         remappings=[
             ('color_image', '/gripper_cam/depth_camera/color/image_raw'),
             ('color_info', '/gripper_cam/depth_camera/color/camera_info'),
+            ('aligned_depth',
+             '/gripper_cam/depth_camera/aligned_depth_to_color/image_raw'),
         ],
         output='screen',
     )

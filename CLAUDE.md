@@ -25,25 +25,35 @@ The project has moved to a **single-camera architecture**. The overhead/scene US
    - **Frame-center adjustment** — iteratively tweak J1 so the pickup centroid lands within 40 px of the image center.
 4. Fine AprilTag localization and descent happen next (still in progress — see "Next big step").
 
-### The three canonical launches
+### The four canonical launches
 
 **Robot stack (MoveIt 2 + controllers + collision scene):**
 ```
 ros2 launch xarm5_basic_position_cmd xarm5_moveit_with_table.launch.py robot_ip:=192.168.1.234 add_gripper:=true
 ```
 
-**Camera + detect_zone (V4L2 flavor — current, because `realsense2_camera` is not installed):**
+**Camera + detect_zone + fine_localization (PRIMARY — uses installed `realsense2_camera` driver, depth enabled):**
+```
+ros2 launch xarm5_basic_position_cmd depth_camera.launch.py
+```
+Brings up `realsense2_camera` (RGB + depth + aligned_depth_to_color @ 640×480), static TF `link_tcp → camera_link`, `gripper_depth_monitor`, `fine_localization` (depth sampling ON) and `detect_zone`.
+
+**Camera + detect_zone (V4L2 fallback — RGB only, if realsense driver misbehaves):**
 ```
 ros2 launch xarm5_basic_position_cmd detect_zone.launch.py
 ```
-Brings up `realsense_v4l2_pub` (RGB at 640×480 from `/dev/video10`) + `detect_zone`.
+Brings up `realsense_v4l2_pub` (RGB only via `/dev/video10`) + the two static TFs + `detect_zone` + `fine_localization` (depth sampling OFF). Use this if the realsense2_camera node fails to start.
 
 **Voice commands (laptop microphone):**
 ```
 ros2 run voice_command voice_command_node
 ```
 
-The older `depth_camera.launch.py` still exists for the future state where the `realsense2_camera` ROS 2 driver is installed (it brings up depth + gripper_depth_monitor + fine_localization + detect_zone together).
+**Tool approach (Phase 10a — align + trace-down, keyboard-driven):**
+```
+ros2 run xarm5_basic_position_cmd tool_approach
+```
+Run in its own terminal so the ↑/↓ keys can drive the descent. Auto-starts on `/detect_zone/complete`.
 
 ## Hardware / physical constants
 
@@ -51,7 +61,7 @@ The older `depth_camera.launch.py` still exists for the future state where the `
 - **Gripper:** UFACTORY G2, `drive_joint` 0 = open, 0.85 = closed.
 - **End-effector link:** `link_tcp` (172 mm below `link_eef`) with gripper attached.
 - **Safety z floor:** −0.085 m in `link_base`.
-- **Tool AprilTags** (tag36h11, **25 mm**): hammer=3, phillips=2, flathead=4. Gripper tag: **22**.
+- **Tool AprilTags** (tag36h11, **25.4 mm (1 in)**): hammer=3, phillips=2, flathead=4. Gripper tag: **22**.
 - **Zone markers:** black squares on white paper (1in square, on white letter-size sheets). No AprilTags on zone corners. Detected by morphological top-hat + ring/center contrast (see `detect_zone.py:detect_zone_markers`).
 - **Zone dimensions:** Pickup 14.5 in × 15.5 in (wider). Dropoff 9.0 in × 15.5 in (narrower). In camera frame at bird's-eye: pickup = RIGHT, dropoff = LEFT.
 - **Carts:** Pickup cart LEFT (+y), 24 in × 18 in, near edge 18 in from base. Dropoff cart RIGHT (−y), 34 in × 17.5 in, near edge 18 in from base, 1.5 in rim. Cart surfaces at z ≈ −2.35 in below base. Cart height: 31 in. *(Cart surface z will be re-measured by user.)*
@@ -77,8 +87,9 @@ Defined in `detect_zone.py:DETECT_ZONE_JOINTS` / `HOVER_PICKUP_JOINTS`.
 | 6 — Gripper integration | done | UFACTORY G2 |
 | 7 — Closed-loop descent | partial | rework bookmarked — see Phase 8b |
 | 8 — Overhead webcam AprilTag perception | **retired** | replaced by single-camera detect_zone |
-| 9 — Voice → detect_zone → hover → center | **done (this merge)** | end-to-end tested on real hardware |
-| 10 — AprilTag normal-vector descent + grasp | **next** | see design below |
+| 9 — Voice → detect_zone → hover → center | done | end-to-end tested on real hardware |
+| 10a — AprilTag align + keyboard trace-down | **done (this merge)** | `tool_approach.py`; no autonomous stop, no grasp yet |
+| 10b — Autonomous stop (depth + pixel-size) + grasp | next | needs `ros-jazzy-realsense2-camera` |
 | 11 — Transfer to dropoff zone | future | |
 
 ## Phase 9 — what exists now
@@ -112,9 +123,25 @@ Every run of `detect_zone` creates `/tmp/detect_zone_debug/<YYYYMMDD_HHMMSS>_<to
 
 Annotations: white crosshair at image center, yellow outlines on detected markers, green hull for PICKUP / orange for DROPOFF, offset in px for centering iterations. First place to look when a run misbehaves.
 
-## Next big step — AprilTag normal-vector descent (Phase 10)
+## Phase 10a — what just landed
 
-Once `detect_zone` has the gripper hovering over the pickup zone and the requested tool's AprilTag (ID 2/3/4, 25 mm) is in view, the arm needs to approach, align, and grasp it. The design the user specified:
+- `fine_localization.py` now publishes **full 6-DOF pose** in `link_base` (not just position). Orientation comes from dt_apriltags' solvePnP, so `Rotate(quat) @ [0,0,1] = tag surface normal in link_base`. Tag size updated to 25.4 mm (1 in).
+- New per-tag topics `/fine_loc/tag_2`, `/fine_loc/tag_3`, `/fine_loc/tag_4` (PoseStamped). `/fine_loc/result` still carries the closest tag for backward compatibility.
+- `fine_localization.py` also publishes two distance-proxy topics per tag:
+  - `/fine_loc/tag_<id>/pixel_size` (`std_msgs/Float32`) — mean edge length in pixels from `tag.corners`. RGB-only, always available.
+  - `/fine_loc/tag_<id>/depth` (`std_msgs/Float32`) — depth at the tag center sampled from `aligned_depth_to_color` (3-px median, handles both 16UC1 mm and 32FC1 m). Only published when `enable_depth:=true` (depth_camera.launch.py sets this; V4L2 fallback does not).
+- `detect_zone.py` now publishes `/detect_zone/complete` (`std_msgs/String`, payload `tool=…|fiducial=…|status=ok|degraded`) on center success.
+- New node `tool_approach.py` (`ros2 run xarm5_basic_position_cmd tool_approach`):
+  - Auto-starts align mode when it sees `/detect_zone/complete` matching a known fiducial; can also be driven manually via `/tool_approach/cmd` (`start <fid>`, `stop`, `descend [mm]`, `raise [mm]`, `set <mm>`) or keyboard (↑/↓ = raise/descend by 10 mm, space = pause, `q` = quit).
+  - Each tick: reads `/fine_loc/tag_<id>`, computes the tag normal, enforces a flat-tag sanity check (>20° tilt → skip with warning), places `link_tcp` along the normal at `standoff_m` above the tag center, plans IK + joint-space move. Safety floor `z = -0.085 m` clamped before every move.
+  - Keyboard is the trace-down interface: each ↓ lowers `standoff_m` by 10 mm so the next align tick commands the arm closer to the tag. Standoff is clamped to 50–300 mm.
+  - **Two-stage distance authority**: `_distance_mode()` picks between `FAR[pixel]` (RGB pinhole heuristic `d ≈ fx * tag_size / pixel_size`, fx=615) and `CLOSE[depth]` (D435i aligned depth). The switch fires when pixel size ≥ `depth_activation_pixel_size_px` (default 70 px ≈ 225 mm for a 25.4 mm tag) AND a depth sample arrived in the last 2 s. Below threshold we stay on the RGB heuristic — depth is unreliable outside the D435i's ≈190 mm min range. If depth drops out after activation, mode logs as `CLOSE[pixel-fallback]`. Status tick (1 Hz) prints all three numbers on one line for live tuning.
+  - Params on `tool_approach`: `depth_activation_pixel_size_px` (70.0), `pixel_dist_fx` (615.0), `tag_size_m` (0.0254), `standoff_m` (0.15), `step_m` (0.010).
+- `depth_camera.launch.py` is the PRIMARY launch now that `ros-jazzy-realsense2-camera` is installed: brings up the realsense driver with `align_depth.enable:=true`, the static TF, `gripper_depth_monitor`, `fine_localization` (depth ON) and `detect_zone`. `detect_zone.launch.py` is a V4L2 fallback (RGB only; depth topic absent → `tool_approach` runs pixel-size-only). `tool_approach` is intentionally NOT in either launch so its keyboard thread has a live TTY when run from its own terminal.
+
+## Next big step — Phase 10b: autonomous stop + grasp
+
+Once `detect_zone` has the gripper hovering over the pickup zone and the requested tool's AprilTag (ID 2/3/4, 25.4 mm) is in view, the arm needs to approach, align, and grasp it. The design the user specified:
 
 1. **Scan for the requested tag** (`dt_apriltags` on the gripper RGB stream, already wired up in `apriltag_perception.py` / `fine_localization.py`).
 2. **Build a perpendicular axis** — the world-frame normal vector emanating from the physical AprilTag plane. For a flat tool lying on the cart, this is just `+z` in `link_base` passing through the tag center XY. (When the tag isn't horizontal, derive from the tag's pose quaternion.)
@@ -125,7 +152,7 @@ Once `detect_zone` has the gripper hovering over the pickup zone and the request
 
 Design notes for whoever implements Phase 10:
 - IK-first planning is mandatory on this 5-DOF arm (see "Architectural conventions" below).
-- Use the 25 mm physical tag size and the D435i color intrinsics (fx=fy≈615, cx=320, cy=240 @ 640×480 — `realsense_v4l2_pub.py:60`) to convert pixel size → distance analytically: `distance ≈ fx * tag_size / pixel_size`.
+- Use the 25.4 mm physical tag size and the D435i color intrinsics (fx=fy≈615, cx=320, cy=240 @ 640×480 — `realsense_v4l2_pub.py:60`) to convert pixel size → distance analytically: `distance ≈ fx * tag_size / pixel_size`.
 - Don't rely on depth-image feedback until `realsense2_camera` is installed. Until then the AprilTag pixel-size heuristic is the depth sensor.
 - The static TF `link_tcp → camera_link` (translation −0.06985, 0, 0.127; pitch −π/2) derived in `depth_camera.launch.py:50` is still the right mount geometry. Reuse it verbatim.
 - Live-robot iteration is expensive. Build the descent math *off-robot* first (static tag pose → planned waypoints → check with TF echo), then do a single dry run, then live.
