@@ -83,13 +83,25 @@ POSE_SMOOTH_N = 5          # running-average window for /fine_loc/tag_N poses
 INITIAL_DESCEND_M = 0.10
 INITIAL_APPROACH_STANDOFF_M = 0.12
 
-# Yaw alignment: how far the commanded tool yaw is allowed to deflect from
-# the radial direction atan2(y,x). On the 5-DOF xArm5, tool yaw is J1+J5,
-# so any yaw is reachable in principle, but large deflections can push J5
-# into limits. If the tag yaw is further than this from radial we wrap
-# around π (tag is symmetric for most tools) and, failing that, fall back
-# to the radial yaw.
-YAW_DEFLECT_WRAP_RAD = math.pi / 2.0
+# Camera mount geometry (must match the static TF link_tcp → camera_link
+# published by depth_camera.launch.py). Used to compute the TCP position
+# that puts the CAMERA over the tag in 'camera' target mode. The launch's
+# yaw=π correction is already baked into the TF chain, so these values
+# are the raw translation in link_tcp exactly as declared in the launch.
+CAM_OFFSET_X_IN_TCP = -0.06985
+CAM_OFFSET_Y_IN_TCP = 0.0
+CAM_OFFSET_Z_IN_TCP = 0.127
+
+# Target modes:
+#   'camera' — command TCP such that the camera's optical axis ends up on
+#              the tag. Gives visual "locked on" feedback because the tag
+#              stays in frame center. Use during tracking / approach.
+#   'tcp'    — command TCP directly to the tag XY (the camera then sits
+#              70 mm off-center in the image). Required for the final
+#              grasp so the jaws close on the tool, not next to it.
+TARGET_MODE_CAMERA = 'camera'
+TARGET_MODE_TCP = 'tcp'
+DEFAULT_TARGET_MODE = TARGET_MODE_CAMERA
 
 # Safety gate: at handoff the camera is hovering directly above the
 # pickup zone, so the tag's reported link_base XY must be within this
@@ -121,30 +133,35 @@ def tool_aligned_quat(x, y, phi=None):
 
 
 def _quat_to_yaw_base(qx, qy, qz, qw):
-    """Yaw (rad) of a tag's local +X axis when expressed in link_base.
+    """Yaw (rad) of the tag's local +X axis when expressed in link_base.
 
-    Used to align J5 with the tag's in-plane rotation so the gripper
-    jaws cross the tool perpendicular to the tag's primary axis. 180°
-    ambiguous — callers should wrap to the half-plane nearest their
-    preferred reference direction.
+    The AprilTag detection produces a unique, non-symmetric orientation
+    (each tag's pattern has a defined "up"), and callers must respect
+    that — no 180° wrap, no axis swap. This function just returns the
+    raw yaw of the tag's +X axis in link_base, and callers use it
+    verbatim as the commanded tool yaw.
     """
     rx = 1.0 - 2.0 * (qy * qy + qz * qz)
     ry = 2.0 * (qx * qy + qw * qz)
     return math.atan2(ry, rx)
 
 
-def _wrap_yaw_near(phi, reference):
-    """Wrap phi to the half-plane within ±π/2 of `reference` by adding ±π.
+def _tcp_for_mode(tag_x, tag_y, phi, mode):
+    """Return the TCP XY that achieves the requested target mode.
 
-    Tool AprilTags are 180° symmetric for grasping purposes (a hammer
-    gripped with the jaws rotated by π is the same grasp). Picking the
-    wrapped copy closest to the radial reference keeps J5 near zero.
+    In 'camera' mode the TCP is shifted by the inverse of the camera
+    mount offset (expressed in link_base for the commanded tool yaw
+    phi), so after the move the camera's optical axis lands on the tag.
+    In 'tcp' mode we command TCP straight at the tag — correct for the
+    final grasp, wrong for visual alignment.
     """
-    while phi - reference > math.pi / 2.0:
-        phi -= math.pi
-    while phi - reference < -math.pi / 2.0:
-        phi += math.pi
-    return phi
+    if mode == TARGET_MODE_CAMERA:
+        cos_p, sin_p = math.cos(phi), math.sin(phi)
+        # R(π, 0, phi) @ (CAM_OFFSET_X, CAM_OFFSET_Y, *) horizontal part:
+        dx = CAM_OFFSET_X_IN_TCP * cos_p + CAM_OFFSET_Y_IN_TCP * sin_p
+        dy = CAM_OFFSET_X_IN_TCP * sin_p - CAM_OFFSET_Y_IN_TCP * cos_p
+        return tag_x - dx, tag_y - dy
+    return tag_x, tag_y
 
 
 class GoTo(Node):
@@ -188,7 +205,9 @@ class GoTo(Node):
         self._pose_window = deque(maxlen=POSE_SMOOTH_N)  # recent (x,y,z) samples
         self._initial_tcp_z = None          # TCP z at first lock
         self._target_z = None               # current commanded z
-        self._last_cmd_xy = None            # last commanded (x, y)
+        self._last_cmd_xy = None            # last commanded TCP (x, y)
+        self._last_cmd_tag_xy = None        # tag (x, y) of last commanded move
+        self._target_mode = DEFAULT_TARGET_MODE  # 'camera' or 'tcp'
         self._tracking_paused = False
         self._move_in_flight = False
 
@@ -206,7 +225,7 @@ class GoTo(Node):
             threading.Thread(target=self._keyboard_loop, daemon=True).start()
             self.get_logger().info(
                 'Keyboard: ↓/Enter descend, ↑ raise, g grab, space pause, '
-                'h home, q quit.')
+                'x toggle camera/tcp mode, h home, q quit.')
         else:
             self.get_logger().warn('No TTY — keyboard disabled.')
 
@@ -262,6 +281,7 @@ class GoTo(Node):
             self._initial_tcp_z = None
             self._target_z = None
             self._last_cmd_xy = None
+            self._last_cmd_tag_xy = None
             self._tracking_paused = False
             self._latest_pixel_px = None
             self._latest_pixel_stamp = None
@@ -373,8 +393,9 @@ class GoTo(Node):
                 self._latest_tag_pose.pose.orientation.w,
             )
             target_z = self._target_z
-            last_cmd = self._last_cmd_xy
+            last_cmd_tag = self._last_cmd_tag_xy
             target_tid = self._target_tag_id
+            mode = self._target_mode
 
         # Safety gate: never plan to an XY that's absurdly far from the
         # current TCP. At hover the camera is roughly above the tag, so
@@ -393,28 +414,33 @@ class GoTo(Node):
                     throttle_duration_sec=2.0)
                 return
 
-        # Re-plan when XY shifted past deadband OR no command issued yet.
-        if last_cmd is not None:
-            dx = tag_x - last_cmd[0]
-            dy = tag_y - last_cmd[1]
+        # Re-plan when the tag XY shifted past the deadband OR no command
+        # has been issued yet. Comparing against the last TAG XY (not last
+        # TCP XY) keeps the deadband meaningful across mode changes.
+        if last_cmd_tag is not None:
+            dx = tag_x - last_cmd_tag[0]
+            dy = tag_y - last_cmd_tag[1]
             if math.hypot(dx, dy) < XY_DEADBAND_M:
                 return  # within deadband — skip
         tcp_txt = (f'tcp({tcp[0]*1000:.0f},{tcp[1]*1000:.0f},{tcp[2]*1000:.0f})'
                    if tcp is not None else 'tcp(?)')
         tool = TOOL_NAMES.get(target_tid, f'tag{target_tid}')
         radial_yaw = math.atan2(tag_y, tag_x)
-        raw_tag_yaw = _quat_to_yaw_base(*tag_q)
-        tag_yaw = _wrap_yaw_near(raw_tag_yaw, radial_yaw)
+        # Raw tag yaw from /fine_loc — used verbatim, no 180° wrap. The
+        # AprilTag has a defined orientation (non-symmetric pattern), so
+        # collapsing it toward the radial direction would swap axes.
+        tag_yaw = _quat_to_yaw_base(*tag_q)
         self.get_logger().info(
-            f'TRACK[{tool}] → {tcp_txt} → tag({tag_x*1000:.0f},'
+            f'TRACK[{tool}|{mode}] → {tcp_txt} → tag({tag_x*1000:.0f},'
             f'{tag_y*1000:.0f}) z={target_z*1000:.0f}mm  '
             f'radial_yaw={math.degrees(radial_yaw):+.0f}°  '
             f'tag_yaw={math.degrees(tag_yaw):+.0f}°')
         threading.Thread(
-            target=self._do_move, args=(tag_x, tag_y, target_z, tag_yaw),
+            target=self._do_move,
+            args=(tag_x, tag_y, target_z, tag_yaw, mode),
             daemon=True).start()
 
-    def _do_move(self, x, y, z, tag_yaw=None):
+    def _do_move(self, tag_x, tag_y, z, tag_yaw=None, mode=DEFAULT_TARGET_MODE):
         with self._lock:
             if self._move_in_flight:
                 return
@@ -429,7 +455,7 @@ class GoTo(Node):
             # tool's long axis), then fall back to the radial yaw if IK
             # can't satisfy the tag-yaw request. Fallback is the
             # always-feasible choice on this 5-DOF arm.
-            radial_yaw = math.atan2(y, x)
+            radial_yaw = math.atan2(tag_y, tag_x)
             candidates = []
             if tag_yaw is not None:
                 candidates.append(('tag', tag_yaw))
@@ -437,14 +463,17 @@ class GoTo(Node):
 
             joints = None
             used_label = None
+            used_phi = None
+            used_tcp = None
             for label, phi in candidates:
+                tcp_x, tcp_y = _tcp_for_mode(tag_x, tag_y, phi, mode)
                 pose = PoseStamped()
                 pose.header.frame_id = FRAME_ID
                 pose.header.stamp = self.get_clock().now().to_msg()
-                pose.pose.position.x = x
-                pose.pose.position.y = y
+                pose.pose.position.x = tcp_x
+                pose.pose.position.y = tcp_y
                 pose.pose.position.z = z
-                qx, qy, qz, qw = tool_aligned_quat(x, y, phi)
+                qx, qy, qz, qw = tool_aligned_quat(tcp_x, tcp_y, phi)
                 pose.pose.orientation.x = qx
                 pose.pose.orientation.y = qy
                 pose.pose.orientation.z = qz
@@ -452,18 +481,25 @@ class GoTo(Node):
                 joints = self._ik(pose)
                 if joints is not None:
                     used_label = label
+                    used_phi = phi
+                    used_tcp = (tcp_x, tcp_y)
                     break
                 self.get_logger().warn(
-                    f'IK failed with {label} yaw={math.degrees(phi):+.0f}°; '
+                    f'IK failed with {label} yaw={math.degrees(phi):+.0f}° '
+                    f'tcp=({tcp_x*1000:.0f},{tcp_y*1000:.0f})mm; '
                     'trying next candidate.')
             if joints is None:
                 return
 
-            label = f'track[{used_label}]({x:.3f},{y:.3f},{z:.3f})'
+            label = (f'track[{mode}/{used_label}] tag=({tag_x:.3f},'
+                     f'{tag_y:.3f}) tcp=({used_tcp[0]:.3f},'
+                     f'{used_tcp[1]:.3f}) z={z:.3f} '
+                     f'yaw={math.degrees(used_phi):+.0f}°')
             ok = self._joint_move(joints, label)
             if ok:
                 with self._lock:
-                    self._last_cmd_xy = (x, y)
+                    self._last_cmd_xy = used_tcp
+                    self._last_cmd_tag_xy = (tag_x, tag_y)
         finally:
             with self._lock:
                 self._move_in_flight = False
@@ -483,8 +519,10 @@ class GoTo(Node):
                     f'Z {new_z*1000:.0f}mm clamped to {clamped*1000:.0f}mm '
                     f'(range {min_z*1000:.0f}-{max_z*1000:.0f}mm).')
             self._target_z = clamped
-            # Force re-plan on next tick by clearing the last-cmd anchor.
+            # Force re-plan on next tick by clearing the last-cmd anchors
+            # (both the TCP command and the tag-XY deadband reference).
             self._last_cmd_xy = None
+            self._last_cmd_tag_xy = None
         self.get_logger().info(
             f'Z step → target_z={self._target_z*1000:.0f}mm (next tick replans).')
 
@@ -524,6 +562,19 @@ class GoTo(Node):
         self.grab_pub.publish(m)
         self.get_logger().info(
             f'GRAB ARMED  → published /tool_approach/grab "{m.data}"')
+
+    def _toggle_target_mode(self):
+        with self._lock:
+            new_mode = (TARGET_MODE_TCP
+                        if self._target_mode == TARGET_MODE_CAMERA
+                        else TARGET_MODE_CAMERA)
+            self._target_mode = new_mode
+            # Force a replan on the next tick so the switch is immediate.
+            self._last_cmd_xy = None
+            self._last_cmd_tag_xy = None
+        self.get_logger().warn(
+            f'Target mode → {new_mode}. '
+            f'{"Camera will recenter on the tag." if new_mode == TARGET_MODE_CAMERA else "TCP will move over the tag (camera ~70 mm off-center is EXPECTED)."}')
 
     def _force_grab(self):
         with self._lock:
@@ -692,6 +743,8 @@ class GoTo(Node):
                         f'Tracking {"PAUSED" if self._tracking_paused else "RESUMED"}.')
                 elif c == 'g':
                     self._force_grab()
+                elif c == 'x':
+                    self._toggle_target_mode()
                 elif c == 'h':
                     threading.Thread(target=self._go_home, daemon=True).start()
                 elif c in ('q', '\x03'):
