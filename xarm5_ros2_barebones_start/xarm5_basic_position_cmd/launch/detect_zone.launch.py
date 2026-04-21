@@ -67,7 +67,11 @@ def generate_launch_description():
                 '--z', '0.127',
                 '--roll', '0.0',
                 '--pitch', '-1.5707963',
-                '--yaw', '0.0',
+                # yaw=π matches depth_camera.launch.py default: earlier test
+                # runs with yaw=0 showed the classic "chase/flee" pattern
+                # (reported_tag ≈ 2·camera − real_tag), fingerprint of a
+                # 180° rotation about the camera's optical axis.
+                '--yaw', '3.14159',
                 '--frame-id', 'link_tcp',
                 '--child-frame-id', 'camera_link',
             ],

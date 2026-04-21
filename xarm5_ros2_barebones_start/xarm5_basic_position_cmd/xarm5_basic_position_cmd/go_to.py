@@ -66,6 +66,7 @@ FRAME_ID = 'link_base'
 JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5']
 SAFETY_Z_FLOOR = -0.110
 TOOL_TAG_IDS = (2, 3, 4)
+TOOL_NAMES = {2: 'phillips', 3: 'hammer', 4: 'flathead'}
 HOME_JOINTS = (0.0, 0.0, 0.0, 0.0, 0.0)
 
 STEP_M = 0.010
@@ -76,15 +77,74 @@ XY_JUMP_REJECT_M = 0.10    # any single pose >10 cm from running avg → ignore
 TRACK_RATE_HZ = 1.5        # tracking loop rate (slow enough for plan + move)
 POSE_SMOOTH_N = 5          # running-average window for /fine_loc/tag_N poses
 
+# Auto-descent on first lock: drop this far below current TCP z, but never
+# closer than INITIAL_APPROACH_STANDOFF_M to the tag's own z. Removes the
+# "arm just sits there after acquire waiting for the ↓ key" feel.
+INITIAL_DESCEND_M = 0.10
+INITIAL_APPROACH_STANDOFF_M = 0.12
+
+# Yaw alignment: how far the commanded tool yaw is allowed to deflect from
+# the radial direction atan2(y,x). On the 5-DOF xArm5, tool yaw is J1+J5,
+# so any yaw is reachable in principle, but large deflections can push J5
+# into limits. If the tag yaw is further than this from radial we wrap
+# around π (tag is symmetric for most tools) and, failing that, fall back
+# to the radial yaw.
+YAW_DEFLECT_WRAP_RAD = math.pi / 2.0
+
+# Safety gate: at handoff the camera is hovering directly above the
+# pickup zone, so the tag's reported link_base XY must be within this
+# radius of the TCP's link_base XY. A larger delta means the
+# fine_localization TF chain is producing bogus poses (see memory:
+# tool_bot_ros2 Phase 10b state), so we refuse to move and log loudly
+# instead of letting the arm wander off.
+SANITY_XY_RADIUS_M = 0.35
+
 SWEET_PX = {2: 107.1, 3: 116.7, 4: 108.3}
 SWEET_TOL_PX = 5.0
 GRAB_HOLD_TICKS = 3
 GRAB_RATE_HZ = 4.0
 
 
-def tool_aligned_quat(x, y):
-    phi = math.atan2(y, x)
+def tool_aligned_quat(x, y, phi=None):
+    """RPY = (π, 0, phi) as (qx, qy, qz, qw).
+
+    With phi=None, phi defaults to the radial direction atan2(y, x) — the
+    IK-friendliest choice on the xArm5 because it lines up with J1's
+    natural value and leaves J5 free to match any further constraint.
+    Passing phi explicitly lets the caller set an arbitrary tool yaw
+    (e.g. from the tag's own yaw in link_base), and IK solves J1+J5 to
+    hit it.
+    """
+    if phi is None:
+        phi = math.atan2(y, x)
     return (math.cos(phi / 2.0), math.sin(phi / 2.0), 0.0, 0.0)
+
+
+def _quat_to_yaw_base(qx, qy, qz, qw):
+    """Yaw (rad) of a tag's local +X axis when expressed in link_base.
+
+    Used to align J5 with the tag's in-plane rotation so the gripper
+    jaws cross the tool perpendicular to the tag's primary axis. 180°
+    ambiguous — callers should wrap to the half-plane nearest their
+    preferred reference direction.
+    """
+    rx = 1.0 - 2.0 * (qy * qy + qz * qz)
+    ry = 2.0 * (qx * qy + qw * qz)
+    return math.atan2(ry, rx)
+
+
+def _wrap_yaw_near(phi, reference):
+    """Wrap phi to the half-plane within ±π/2 of `reference` by adding ±π.
+
+    Tool AprilTags are 180° symmetric for grasping purposes (a hammer
+    gripped with the jaws rotated by π is the same grasp). Picking the
+    wrapped copy closest to the radial reference keeps J5 near zero.
+    """
+    while phi - reference > math.pi / 2.0:
+        phi -= math.pi
+    while phi - reference < -math.pi / 2.0:
+        phi += math.pi
+    return phi
 
 
 class GoTo(Node):
@@ -245,11 +305,46 @@ class GoTo(Node):
                 tcp = self._tcp_position_unsafe()
                 if tcp is not None:
                     self._initial_tcp_z = tcp[2]
-                    self._target_z = tcp[2]
-                    self.get_logger().info(
-                        f'FIRST smoothed tag pose: '
-                        f'({ax*1000:.0f},{ay*1000:.0f},{az*1000:.0f})mm  '
-                        f'tcp_z={tcp[2]*1000:.0f}mm — tracking engaged.')
+                    # Auto-descend: drop INITIAL_DESCEND_M below current
+                    # TCP z, but keep INITIAL_APPROACH_STANDOFF_M above
+                    # the tag itself. Next tick replans to this z so the
+                    # arm visibly moves closer right after acquire.
+                    initial_target = tcp[2] - INITIAL_DESCEND_M
+                    initial_target = max(
+                        initial_target, az + INITIAL_APPROACH_STANDOFF_M)
+                    initial_target = max(
+                        initial_target, SAFETY_Z_FLOOR + 0.02)
+                    self._target_z = initial_target
+                    # First-pose self-check: at hover the camera is ~
+                    # directly above the tag, so tag XY in link_base
+                    # should be near TCP XY (within a few cm due to the
+                    # camera-to-TCP mount offset). If it's wildly off,
+                    # fine_localization's pose is bogus — log loudly
+                    # and let _track_tick's safety gate block the move.
+                    dx = ax - tcp[0]
+                    dy = ay - tcp[1]
+                    d_xy = math.hypot(dx, dy)
+                    verdict = 'SANE' if d_xy <= SANITY_XY_RADIUS_M else 'BOGUS'
+                    tool = TOOL_NAMES.get(
+                        self._target_tag_id, f'tag{self._target_tag_id}')
+                    self.get_logger().warn(
+                        f'FIRST tag pose [{verdict}] tool={tool} '
+                        f'(id={self._target_tag_id}): '
+                        f'tag=({ax*1000:+.0f},{ay*1000:+.0f},{az*1000:+.0f})mm  '
+                        f'tcp=({tcp[0]*1000:+.0f},{tcp[1]*1000:+.0f},'
+                        f'{tcp[2]*1000:+.0f})mm  '
+                        f'delta_xy=({dx*1000:+.0f},{dy*1000:+.0f})mm '
+                        f'|Δ|={d_xy*1000:.0f}mm  '
+                        f'(limit={SANITY_XY_RADIUS_M*1000:.0f}mm)  '
+                        f'auto_descend_to_z={initial_target*1000:+.0f}mm')
+                    if d_xy > SANITY_XY_RADIUS_M:
+                        self.get_logger().error(
+                            'First tag pose is further from TCP than the '
+                            'sanity radius. Refusing to track — check the '
+                            'static TF link_tcp→camera_link in '
+                            'depth_camera.launch.py and the /fine_loc/tag '
+                            'output. Run `ros2 run xarm5_basic_position_cmd '
+                            'pose_check` for a side-by-side readout.')
 
     def _pixel_cb(self, msg):
         v = float(msg.data)
@@ -271,8 +366,32 @@ class GoTo(Node):
                 return  # stale tag — hold pose
             tag_x = self._latest_tag_pose.pose.position.x
             tag_y = self._latest_tag_pose.pose.position.y
+            tag_q = (
+                self._latest_tag_pose.pose.orientation.x,
+                self._latest_tag_pose.pose.orientation.y,
+                self._latest_tag_pose.pose.orientation.z,
+                self._latest_tag_pose.pose.orientation.w,
+            )
             target_z = self._target_z
             last_cmd = self._last_cmd_xy
+            target_tid = self._target_tag_id
+
+        # Safety gate: never plan to an XY that's absurdly far from the
+        # current TCP. At hover the camera is roughly above the tag, so
+        # tag XY in link_base should be close to TCP XY; a huge delta
+        # means the pose is bogus and we'd wander off blindly.
+        tcp = self._tcp_position_unsafe()
+        if tcp is not None:
+            d_xy = math.hypot(tag_x - tcp[0], tag_y - tcp[1])
+            if d_xy > SANITY_XY_RADIUS_M:
+                self.get_logger().warn(
+                    f'TRACK blocked: tag XY is {d_xy*1000:.0f}mm from TCP '
+                    f'(>limit {SANITY_XY_RADIUS_M*1000:.0f}mm). '
+                    f'tag=({tag_x*1000:+.0f},{tag_y*1000:+.0f}) '
+                    f'tcp=({tcp[0]*1000:+.0f},{tcp[1]*1000:+.0f}). '
+                    'Fine localization pose looks wrong — not moving.',
+                    throttle_duration_sec=2.0)
+                return
 
         # Re-plan when XY shifted past deadband OR no command issued yet.
         if last_cmd is not None:
@@ -280,17 +399,22 @@ class GoTo(Node):
             dy = tag_y - last_cmd[1]
             if math.hypot(dx, dy) < XY_DEADBAND_M:
                 return  # within deadband — skip
-        tcp = self._tcp_position_unsafe()
         tcp_txt = (f'tcp({tcp[0]*1000:.0f},{tcp[1]*1000:.0f},{tcp[2]*1000:.0f})'
                    if tcp is not None else 'tcp(?)')
+        tool = TOOL_NAMES.get(target_tid, f'tag{target_tid}')
+        radial_yaw = math.atan2(tag_y, tag_x)
+        raw_tag_yaw = _quat_to_yaw_base(*tag_q)
+        tag_yaw = _wrap_yaw_near(raw_tag_yaw, radial_yaw)
         self.get_logger().info(
-            f'TRACK → {tcp_txt} → tag({tag_x*1000:.0f},{tag_y*1000:.0f}) '
-            f'z={target_z*1000:.0f}mm')
+            f'TRACK[{tool}] → {tcp_txt} → tag({tag_x*1000:.0f},'
+            f'{tag_y*1000:.0f}) z={target_z*1000:.0f}mm  '
+            f'radial_yaw={math.degrees(radial_yaw):+.0f}°  '
+            f'tag_yaw={math.degrees(tag_yaw):+.0f}°')
         threading.Thread(
-            target=self._do_move, args=(tag_x, tag_y, target_z),
+            target=self._do_move, args=(tag_x, tag_y, target_z, tag_yaw),
             daemon=True).start()
 
-    def _do_move(self, x, y, z):
+    def _do_move(self, x, y, z, tag_yaw=None):
         with self._lock:
             if self._move_in_flight:
                 return
@@ -300,22 +424,43 @@ class GoTo(Node):
                 self.get_logger().warn(
                     f'z={z*1000:.0f}mm below floor — clamping.')
                 z = SAFETY_Z_FLOOR + 0.005
-            pose = PoseStamped()
-            pose.header.frame_id = FRAME_ID
-            pose.header.stamp = self.get_clock().now().to_msg()
-            pose.pose.position.x = x
-            pose.pose.position.y = y
-            pose.pose.position.z = z
-            qx, qy, qz, qw = tool_aligned_quat(x, y)
-            pose.pose.orientation.x = qx
-            pose.pose.orientation.y = qy
-            pose.pose.orientation.z = qz
-            pose.pose.orientation.w = qw
 
-            joints = self._ik(pose)
+            # Try tag-yaw first (so the gripper's jaws align with the
+            # tool's long axis), then fall back to the radial yaw if IK
+            # can't satisfy the tag-yaw request. Fallback is the
+            # always-feasible choice on this 5-DOF arm.
+            radial_yaw = math.atan2(y, x)
+            candidates = []
+            if tag_yaw is not None:
+                candidates.append(('tag', tag_yaw))
+            candidates.append(('radial', radial_yaw))
+
+            joints = None
+            used_label = None
+            for label, phi in candidates:
+                pose = PoseStamped()
+                pose.header.frame_id = FRAME_ID
+                pose.header.stamp = self.get_clock().now().to_msg()
+                pose.pose.position.x = x
+                pose.pose.position.y = y
+                pose.pose.position.z = z
+                qx, qy, qz, qw = tool_aligned_quat(x, y, phi)
+                pose.pose.orientation.x = qx
+                pose.pose.orientation.y = qy
+                pose.pose.orientation.z = qz
+                pose.pose.orientation.w = qw
+                joints = self._ik(pose)
+                if joints is not None:
+                    used_label = label
+                    break
+                self.get_logger().warn(
+                    f'IK failed with {label} yaw={math.degrees(phi):+.0f}°; '
+                    'trying next candidate.')
             if joints is None:
                 return
-            ok = self._joint_move(joints, f'track({x:.3f},{y:.3f},{z:.3f})')
+
+            label = f'track[{used_label}]({x:.3f},{y:.3f},{z:.3f})'
+            ok = self._joint_move(joints, label)
             if ok:
                 with self._lock:
                     self._last_cmd_xy = (x, y)

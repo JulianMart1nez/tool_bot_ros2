@@ -24,10 +24,29 @@ Usage:
 """
 
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
+
+    # link_tcp → camera_link mount calibration, exposed as launch args
+    # so the values can be tweaked at runtime (no rebuild) while chasing
+    # the "arm wanders" bug. Defaults match the in-situ measurement
+    # described in the block comment on the static TF below.
+    tcp_cam_x = DeclareLaunchArgument('tcp_cam_x', default_value='-0.06985')
+    tcp_cam_y = DeclareLaunchArgument('tcp_cam_y', default_value='0.0')
+    tcp_cam_z = DeclareLaunchArgument('tcp_cam_z', default_value='0.127')
+    tcp_cam_roll = DeclareLaunchArgument('tcp_cam_roll', default_value='0.0')
+    tcp_cam_pitch = DeclareLaunchArgument(
+        'tcp_cam_pitch', default_value='-1.5707963')
+    # Default yaw is π (180°). Earlier test runs with yaw=0 showed the
+    # classic "chase/flee" pattern: reported_tag_xy ≈ 2·camera_xy − real_tag_xy,
+    # which is the fingerprint of a 180° rotation about the camera's optical
+    # axis in the link_tcp → camera_link mount transform. Override at launch
+    # with tcp_cam_yaw:=0.0 if you rebuild the mount.
+    tcp_cam_yaw = DeclareLaunchArgument('tcp_cam_yaw', default_value='3.14159')
 
     realsense_node = Node(
         package='realsense2_camera',
@@ -71,12 +90,12 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='gripper_camera_tf',
         arguments=[
-            '--x', '-0.06985',
-            '--y', '0.0',
-            '--z', '0.127',
-            '--roll', '0.0',
-            '--pitch', '-1.5707963',
-            '--yaw', '0.0',
+            '--x', LaunchConfiguration('tcp_cam_x'),
+            '--y', LaunchConfiguration('tcp_cam_y'),
+            '--z', LaunchConfiguration('tcp_cam_z'),
+            '--roll', LaunchConfiguration('tcp_cam_roll'),
+            '--pitch', LaunchConfiguration('tcp_cam_pitch'),
+            '--yaw', LaunchConfiguration('tcp_cam_yaw'),
             '--frame-id', 'link_tcp',
             '--child-frame-id', 'camera_link',
         ],
@@ -124,6 +143,12 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        tcp_cam_x,
+        tcp_cam_y,
+        tcp_cam_z,
+        tcp_cam_roll,
+        tcp_cam_pitch,
+        tcp_cam_yaw,
         realsense_node,
         camera_tf,
         depth_monitor,

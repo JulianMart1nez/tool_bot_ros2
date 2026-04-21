@@ -235,17 +235,36 @@ class FineLocalization(Node):
             self._last_detected = False
             return
 
+        # Prefer the image's own timestamp so the transform matches the
+        # arm pose when the frame was captured. During continuous
+        # tracking the arm can move meaningfully between capture and
+        # TF lookup, and using rclpy.time.Time() (= latest) produces
+        # poses that are inconsistent with the image.
+        tf = None
         try:
             tf = self.tf_buffer.lookup_transform(
-                TARGET_FRAME, header.frame_id, rclpy.time.Time(),
+                TARGET_FRAME, header.frame_id, header.stamp,
                 timeout=rclpy.duration.Duration(seconds=0.1))
-        except Exception as e:
-            self.get_logger().warn(
-                f'TF lookup {TARGET_FRAME} <- {header.frame_id} failed: {e}',
-                throttle_duration_sec=2.0)
-            detected_msg.data = False
-            self.pub_detected.publish(detected_msg)
-            return
+        except Exception as e_stamped:
+            # Fall back to latest if the buffer doesn't have that exact
+            # timestamp yet (rare, usually on first frames or after
+            # clock hiccups). Log both failures the first time.
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    TARGET_FRAME, header.frame_id, rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.1))
+                self.get_logger().warn(
+                    f'TF at image stamp unavailable ({e_stamped}); '
+                    f'used latest instead.',
+                    throttle_duration_sec=5.0)
+            except Exception as e_latest:
+                self.get_logger().warn(
+                    f'TF lookup {TARGET_FRAME} <- {header.frame_id} failed: '
+                    f'{e_latest}',
+                    throttle_duration_sec=2.0)
+                detected_msg.data = False
+                self.pub_detected.publish(detected_msg)
+                return
 
         detected_msg.data = True
         self.pub_detected.publish(detected_msg)
@@ -306,11 +325,20 @@ class FineLocalization(Node):
                 f'depth={closest_depth_m*1000:.0f}mm'
                 if self._depth_enabled and not np.isnan(closest_depth_m)
                 else ('depth=n/a' if self._depth_enabled else 'depth=disabled'))
+            # Raw optical-frame translation from solvePnP. Useful for
+            # sanity-checking the TF chain: if optical (x,y) is near 0
+            # and z>0, the camera is directly above the tag; if the
+            # transformed link_base (x,y) is then wildly off from the
+            # current TCP (x,y), the static TF link_tcp→camera_link is
+            # suspect. See pose_check (ros2 run ... pose_check).
+            t_opt = np.array(closest_tag.pose_t).flatten()
             self.get_logger().info(
-                f'{TOOL_TAGS[closest_tag.tag_id]} (id={closest_tag.tag_id}) @ link_base: '
-                f'pos=({p.x*1000:.1f},{p.y*1000:.1f},{p.z*1000:.1f})mm  '
+                f'{TOOL_TAGS[closest_tag.tag_id]} (id={closest_tag.tag_id})  '
+                f'optical(x,y,z)=({t_opt[0]*1000:+.1f},'
+                f'{t_opt[1]*1000:+.1f},{t_opt[2]*1000:+.1f})mm  '
+                f'→ link_base pos=({p.x*1000:+.1f},{p.y*1000:+.1f},'
+                f'{p.z*1000:+.1f})mm  '
                 f'normal=({nx:+.2f},{ny:+.2f},{nz:+.2f})  '
-                f'cam_solvePnP_z={closest_cam_z*1000:.1f}mm  '
                 f'pixel={closest_pixel_size:.0f}px  {depth_str}')
         self._last_detected = True
 

@@ -40,6 +40,7 @@ setup(
             'arm_pose_monitor = xarm5_basic_position_cmd.arm_pose_monitor:main',
             'go_to = xarm5_basic_position_cmd.go_to:main',
             'debug_overlay = xarm5_basic_position_cmd.debug_overlay:main',
+            'pose_check = xarm5_basic_position_cmd.pose_check:main',
         ],
     },
 )
