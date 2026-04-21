@@ -79,9 +79,12 @@ POSE_SMOOTH_N = 5          # running-average window for /fine_loc/tag_N poses
 
 # Auto-descent on first lock: drop this far below current TCP z, but never
 # closer than INITIAL_APPROACH_STANDOFF_M to the tag's own z. Removes the
-# "arm just sits there after acquire waiting for the ↓ key" feel.
+# "arm just sits there after acquire waiting for the ↓ key" feel. The
+# final target is also clamped to never exceed the current TCP z — an
+# auto-descend must not accidentally ASCEND when the tag floor is above
+# the current TCP (that just means we're already close to the tag).
 INITIAL_DESCEND_M = 0.10
-INITIAL_APPROACH_STANDOFF_M = 0.12
+INITIAL_APPROACH_STANDOFF_M = 0.08
 
 # Camera mount geometry (must match the static TF link_tcp → camera_link
 # published by depth_camera.launch.py). Used to compute the TCP position
@@ -133,17 +136,29 @@ def tool_aligned_quat(x, y, phi=None):
 
 
 def _quat_to_yaw_base(qx, qy, qz, qw):
-    """Yaw (rad) of the tag's local +X axis when expressed in link_base.
+    """Yaw (rad) of the tag's readable "up" direction in link_base.
 
-    The AprilTag detection produces a unique, non-symmetric orientation
-    (each tag's pattern has a defined "up"), and callers must respect
-    that — no 180° wrap, no axis swap. This function just returns the
-    raw yaw of the tag's +X axis in link_base, and callers use it
-    verbatim as the commanded tool yaw.
+    AprilTags are non-symmetric: the printed pattern has a canonical
+    readable orientation, with the top of the pattern = tag's local
+    −Y axis (dt_apriltags / OpenCV image convention: +X right, +Y down,
+    +Z out of the tag). We want the camera's image-vertical to line up
+    with the tag's readable vertical, which means the gripper's tool
+    yaw should point along the tag's −Y axis in link_base — not its +X
+    axis. Using +X put the image vertical 90° off the printed "up",
+    which is the mismatch the user saw on the hammer.
+
+    Derivation: −Y of tag in link_base = R @ [0, -1, 0] = -(R[:,1]).
+    Standard quaternion → rotation matrix gives the 2nd column as:
+        R[0,1] = 2*(qx*qy - qw*qz)
+        R[1,1] = 1 - 2*(qx*qx + qz*qz)
+    So −Y's horizontal components in link_base are:
+        up_x = -2*(qx*qy - qw*qz) = 2*(qw*qz - qx*qy)
+        up_y = -(1 - 2*(qx*qx + qz*qz)) = 2*(qx*qx + qz*qz) - 1
+    We take atan2(up_y, up_x) and use it verbatim as the tool yaw.
     """
-    rx = 1.0 - 2.0 * (qy * qy + qz * qz)
-    ry = 2.0 * (qx * qy + qw * qz)
-    return math.atan2(ry, rx)
+    up_x = 2.0 * (qw * qz - qx * qy)
+    up_y = 2.0 * (qx * qx + qz * qz) - 1.0
+    return math.atan2(up_y, up_x)
 
 
 def _tcp_for_mode(tag_x, tag_y, phi, mode):
@@ -329,12 +344,27 @@ class GoTo(Node):
                     # TCP z, but keep INITIAL_APPROACH_STANDOFF_M above
                     # the tag itself. Next tick replans to this z so the
                     # arm visibly moves closer right after acquire.
-                    initial_target = tcp[2] - INITIAL_DESCEND_M
+                    # Clamp to never ASCEND — if the tag-floor or safety
+                    # floor is already above current TCP, that means we
+                    # are already at/near the approach standoff and we
+                    # should simply hold z and let keyboard take over,
+                    # not command the arm upward.
+                    descent_candidate = tcp[2] - INITIAL_DESCEND_M
+                    tag_floor = az + INITIAL_APPROACH_STANDOFF_M
+                    safety_floor = SAFETY_Z_FLOOR + 0.02
                     initial_target = max(
-                        initial_target, az + INITIAL_APPROACH_STANDOFF_M)
-                    initial_target = max(
-                        initial_target, SAFETY_Z_FLOOR + 0.02)
+                        descent_candidate, tag_floor, safety_floor)
+                    initial_target = min(initial_target, tcp[2])
                     self._target_z = initial_target
+                    self.get_logger().warn(
+                        f'AUTO_DESCEND components: '
+                        f'tcp_z={tcp[2]*1000:+.0f}mm  '
+                        f'tag_z={az*1000:+.0f}mm  '
+                        f'descent_candidate={descent_candidate*1000:+.0f}mm  '
+                        f'tag_floor={tag_floor*1000:+.0f}mm  '
+                        f'safety_floor={safety_floor*1000:+.0f}mm  '
+                        f'→ target_z={initial_target*1000:+.0f}mm  '
+                        f'descent_from_tcp={(tcp[2]-initial_target)*1000:+.0f}mm')
                     # First-pose self-check: at hover the camera is ~
                     # directly above the tag, so tag XY in link_base
                     # should be near TCP XY (within a few cm due to the
@@ -426,15 +456,16 @@ class GoTo(Node):
                    if tcp is not None else 'tcp(?)')
         tool = TOOL_NAMES.get(target_tid, f'tag{target_tid}')
         radial_yaw = math.atan2(tag_y, tag_x)
-        # Raw tag yaw from /fine_loc — used verbatim, no 180° wrap. The
-        # AprilTag has a defined orientation (non-symmetric pattern), so
-        # collapsing it toward the radial direction would swap axes.
+        # Tag yaw = direction of tag's readable "up" (local −Y) in
+        # link_base. Used verbatim so the camera's image-vertical aligns
+        # with the printed top-of-pattern. No 180° wrap, no axis swap —
+        # AprilTags are non-symmetric and must be respected exactly.
         tag_yaw = _quat_to_yaw_base(*tag_q)
         self.get_logger().info(
             f'TRACK[{tool}|{mode}] → {tcp_txt} → tag({tag_x*1000:.0f},'
             f'{tag_y*1000:.0f}) z={target_z*1000:.0f}mm  '
             f'radial_yaw={math.degrees(radial_yaw):+.0f}°  '
-            f'tag_yaw={math.degrees(tag_yaw):+.0f}°')
+            f'tag_up_yaw={math.degrees(tag_yaw):+.0f}°')
         threading.Thread(
             target=self._do_move,
             args=(tag_x, tag_y, target_z, tag_yaw, mode),
