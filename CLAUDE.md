@@ -89,7 +89,7 @@ Defined in `detect_zone.py:DETECT_ZONE_JOINTS` / `HOVER_PICKUP_JOINTS`.
 | 8 — Overhead webcam AprilTag perception | **retired** | replaced by single-camera detect_zone |
 | 9 — Voice → detect_zone → hover → center | done | end-to-end tested on real hardware |
 | 10a — AprilTag align + keyboard trace-down | done | `tool_approach.py`; no autonomous stop, no grasp yet |
-| 10b — go_to continuous tracking + tag-acquire + grab-arming | **WIP — blocked on pose-correctness verification** | `go_to.py`; user reports arm wanders in wrong direction |
+| 10b — go_to continuous tracking + tag-acquire + grab-arming | **WIP — root cause identified 2026-04-20, fix deferred** | `go_to.py` DEFAULT_TARGET_MODE=CAMERA lands TCP 70 mm off tag → IK sits on reach edge → arm stalls at hover. One-line fix queued; see "Open bug" section. |
 | 10c — Autonomous stop + gripper close | next | depends on 10b trusted alignment |
 | 11 — Transfer to dropoff zone | future | |
 
@@ -127,14 +127,45 @@ Defined in `detect_zone.py:DETECT_ZONE_JOINTS` / `HOVER_PICKUP_JOINTS`.
   ```
   If this keeps happening, drop sensitivity 3 → 2 in `xarm5_moveit_with_table.launch.py`.
 
-### Open bug — TRACK moves arm in nonsensical direction
-Going into the new session: user reports even after acquiring the right tag, the arm "moves in a nonsensical way in a random direction" — not toward the tag's actual XY. Unverified hypothesis: `/fine_loc/tag_<id>` poses may have a TF mis-chain (wrong sign/axis swap). **First diagnostic step** in the next session should be:
+### Open bug — "aligning but not grabbable" (root-cause identified 2026-04-20, fix deferred to next session)
+
+**Symptom:** user commands "give me a hammer"; arm runs bird's-eye → hover → center → acquire cleanly, then stalls in the hover position. Even after acquiring, the gripper ends up ~70 mm off the tool so the eventual descent can never grab it.
+
+**Pre-flight verified clean this session:**
+- S1 — camera feed steady 30 Hz on `/gripper_cam/depth_camera/color/image_raw`
+- S2 — static TF `link_tcp → camera_link` = (−0.070, 0, 0.127) RPY (0°, −90°, 180°), full chain `link_base → link_tcp` resolves.
+- T3 voice needs `pip install SpeechRecognition pyaudio` + `apt install python3-pyaudio` (now installed 2026-04-20). Mic calibrated, parsing "give me a hammer" correctly.
+
+**Root cause — confirmed from go_to TRACK logs + arithmetic, not guessed:**
+`go_to.py:107` sets `DEFAULT_TARGET_MODE = TARGET_MODE_CAMERA`. In camera mode, `_tcp_for_mode()` returns the tag XY **offset by `+CAM_OFFSET_X_IN_TCP` radially outward** (CAM_OFFSET_X_IN_TCP = −0.06985). The intent is to place the camera (mounted −70 mm along link_tcp +X) over the tag — which necessarily puts the TCP 70 mm past the tag. Numerically verified on the last successful move:
+- tag in link_base = (0.485, 0.276)
+- commanded TCP   = (0.554, 0.265)
+- |Δ| = √(0.069² + 0.011²) = **0.070 m ✓** (matches −CAM_OFFSET_X_IN_TCP)
+
+**Secondary symptom = the "stall" user sees:** that 70 mm outward push lands the TCP target near the 5-DOF reachable-envelope edge at z ≈ 0.315 m. TRAC-IK returns `-31` (NO_IK_SOLUTION) for 15–20 s until the tag's yaw jitters enough that the `tag_up_yaw` candidate becomes reachable. During that window the arm doesn't move → looks "stuck at hover".
+
+Representative log (T4 bash `bvx5udgq4.output` around t=1776748777):
 ```
-# With arm at hover and tag visible:
-ros2 topic echo --once /fine_loc/tag_2
-ros2 run tf2_ros tf2_echo link_base link_tcp
+TRACK[hammer|camera] → tcp(501,207,412) → tag(512,264) z=312mm radial_yaw=+27°
+IK failed (code=-31) for pose (0.574,0.296,0.312).   # repeats ~18 s
+...
+[track[camera/tag] tag=(0.485,0.276) tcp=(0.554,0.265) z=0.315 yaw=-10°] Move done.
 ```
-Tag XY should be close to TCP XY (camera is directly above tag). If not → fix `fine_localization.py`, not `go_to.py`.
+
+**Fix options to try next session (in order):**
+1. **One-line flip** — `go_to.py:107` `DEFAULT_TARGET_MODE = TARGET_MODE_TCP`. TCP goes directly to (tag_x, tag_y), gripper lands on the tag, and IK stops sitting on the reach edge. This is the test-the-hypothesis change; expect the stall to disappear too. Keep camera mode available via the keyboard 'x' toggle for the pre-alignment phase where you actually want the camera centered.
+2. **Two-phase tracker** — start in CAMERA mode (to let fine_loc see the tag cleanly), auto-flip to TCP once pixel size ≥ some threshold (tag is centered and close). Needs a state-machine edit in `go_to.py::_tick`.
+3. **Hybrid offset** — use TCP target but nudge by half the camera offset (~35 mm). Compromise that keeps the tag visible at close range while putting the gripper closer to the tool. Empirical — probably not the right call unless (1) reveals a visibility gap.
+
+**Out of scope but noticed in the same session (bookmark for later):**
+- `fine_localization` logged `flathead_screwdriver (id=4)` at `link_base pos=(+391.0,+166.3,−377.6)mm`. z=−378 mm is ~300 mm below the cart surface and well below the −85 mm safety floor — physically impossible. If go_to ever subscribes to tag_4 with this pose, it'll command the arm below the floor and get clamped. Worth a separate investigation into fine_loc's PnP stability for tag 4 (the flathead fiducial) when it's far off-axis from the camera.
+- "go home" voice command fired while a tracking move was executing; MoveIt appears to have dropped the home goal instead of preempting. Need to decide: should the home thread preempt tracking, or queue behind it? Current behavior = neither cleanly.
+
+**Next-session resume checklist:**
+1. Relaunch T1 → T2, re-run S1/S2 if anything was restarted.
+2. Apply fix option 1 (flip `DEFAULT_TARGET_MODE` to `TARGET_MODE_TCP`), `colcon build --packages-select xarm5_basic_position_cmd --symlink-install`.
+3. Voice command "give me a hammer". Expect: no IK failure storm, TCP lands on tag XY, gripper visually over the tool.
+4. Only after (3) succeeds: begin Phase 10c (autonomous stop + gripper close via `/xarm_gripper/gripper_action`).
 
 ### Canonical terminal launch (`~/Desktop/t*.sh`)
 `t1_robot.sh` → `t2_camera.sh` → `t3_voice.sh` → `t4_approach.sh` (`go_to`). `t5_camera_view.sh` opens `rqt_image_view /debug/overlay`. `t6_arm_monitor.sh` streams robot_states. `t7_camera_feeds.sh` = RGB + aligned_depth viewer.
