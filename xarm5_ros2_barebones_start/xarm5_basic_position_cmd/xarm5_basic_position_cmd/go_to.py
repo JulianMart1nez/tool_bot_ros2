@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-go_to.py — continuous AprilTag tracking + descent + grab + home.
+go_to.py — AprilTag closed-loop target visualization + keyboard-commit moves.
 
 Behaviour after detect_zone hovers over the pickup zone:
 
@@ -8,20 +8,37 @@ Behaviour after detect_zone hovers over the pickup zone:
     /fine_loc/tag_N            (PoseStamped, in link_base)
     /fine_loc/tag_N/pixel_size (Float32)
 
-  Tracking timer (TRACK_RATE_HZ): every tick reads the LATEST tag pose
-  (not a one-time snapshot). If the tag has moved more than XY_DEADBAND_M
-  from the last commanded XY, OR the operator changed the Z offset with
-  the keyboard, plans an IK + joint-space move to (tag_x, tag_y, target_z)
-  with the J5 yaw aligned to the tool. This means: the arm continuously
-  follows the tag in XY while the operator paces the descent in Z.
+  Tracking timer (TRACK_RATE_HZ): every tick recomputes the projected
+  target TCP pose from the LATEST tag pose (closed-loop — no saved
+  snapshot) and publishes it for visualization:
+
+    /go_to/target_pose   (geometry_msgs/PoseStamped, link_base)
+    /go_to/viz           (visualization_msgs/MarkerArray)
+       id=0 SPHERE       — target TCP position (green)
+       id=1 CUBE         — detected AprilTag (yellow)
+       id=2 ARROW        — tool approach axis (blue)
+
+  The track tick does NOT auto-move the arm. Motion only happens when
+  the operator presses ↓/↑/m on the keyboard — each key press rebuilds
+  the IK target from the LIVE tag pose, calls /compute_ik fresh, and
+  plans a joint-space move to it. Nothing is "saved": every commit is a
+  new IK against the newest tag sample.
 
   Keyboard:
-    ↓ / Enter : descend 10 mm (target_z -= STEP_M)
-    ↑         : raise   10 mm
-    g         : force grab trigger
-    space     : pause tracking
+    ↓ / Enter : descend  by current step size and commit move
+    ↑         : raise    by current step size and commit move
+    s         : cycle approach step size (10mm → 5mm → 1mm → wrap)
+    m         : commit move to current displayed target (no z change)
+    g         : CLOSE gripper (manual grab) via /xarm_gripper/gripper_action
+    o         : OPEN  gripper (release / reset between manual attempts)
+    x         : toggle target mode (camera ↔ tcp)
+    space     : pause/resume target publishing
     h         : send arm home (all joints zero)
     q         : quit
+
+  Manual grab workflow: descend with ↓ at 10mm until close, press 's' to
+  switch to 5mm, refine, press 's' again for 1mm, refine, then 'g' to
+  close the gripper. 'o' opens for the next attempt.
 
   Voice:
     /voice_command/home_request → arm home (high-priority, with verbose log)
@@ -30,6 +47,9 @@ Behaviour after detect_zone hovers over the pickup zone:
 Grab arming: when /fine_loc/tag_N/pixel_size lands within sweet_px ± tol
 for GRAB_HOLD_TICKS consecutive samples, publishes /tool_approach/grab
 and pauses tracking until reset.
+
+To visualize in RViz: add a "Pose" display on /go_to/target_pose and a
+"MarkerArray" display on /go_to/viz.
 
 To test home WITHOUT voice (sanity check the go_to side):
   ros2 topic pub --once /voice_command/home_request std_msgs/String "{data: 'cli'}"
@@ -52,13 +72,15 @@ from rclpy.node import Node
 
 import tf2_ros
 
-from geometry_msgs.msg import PoseStamped
+from control_msgs.action import GripperCommand
+from geometry_msgs.msg import Point, PoseStamped
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import (
     Constraints, JointConstraint, MotionPlanRequest, PositionIKRequest,
 )
 from moveit_msgs.srv import GetPositionIK
-from std_msgs.msg import Float32, String
+from std_msgs.msg import ColorRGBA, Float32, String
+from visualization_msgs.msg import Marker, MarkerArray
 
 
 PLANNING_GROUP = 'xarm5'
@@ -70,6 +92,19 @@ TOOL_NAMES = {2: 'phillips', 3: 'hammer', 4: 'flathead'}
 HOME_JOINTS = (0.0, 0.0, 0.0, 0.0, 0.0)
 
 STEP_M = 0.010
+# Cycled by the 's' key during final approach. Order = the rotation order
+# the user sees: coarse → medium → fine → wraps. Default index 0 keeps
+# the historical 10 mm behaviour for ↑/↓.
+STEP_SIZES_M = (0.010, 0.005, 0.001)
+
+# UFACTORY G2 gripper drive_joint range: 0 = open, 0.85 = closed.
+# Effort 0.0 means "no caller-imposed limit" (the action server uses its
+# own default), which is what test_descent.py has used reliably.
+GRIPPER_OPEN_POS = 0.0
+GRIPPER_CLOSE_POS = 0.85
+GRIPPER_EFFORT = 0.0
+GRIPPER_ACTION_TIMEOUT_S = 10.0
+
 MAX_DOWN_M = 0.40
 MAX_UP_M = 0.20
 XY_DEADBAND_M = 0.015      # re-plan when smoothed tag XY shifts >1.5 cm
@@ -161,6 +196,12 @@ def _quat_to_yaw_base(qx, qy, qz, qw):
     return math.atan2(up_y, up_x)
 
 
+def _point(x, y, z):
+    p = Point()
+    p.x, p.y, p.z = float(x), float(y), float(z)
+    return p
+
+
 def _tcp_for_mode(tag_x, tag_y, phi, mode):
     """Return the TCP XY that achieves the requested target mode.
 
@@ -192,6 +233,9 @@ class GoTo(Node):
             self, MoveGroup, '/move_action', callback_group=self.cb_group)
         self.ik_client = self.create_client(
             GetPositionIK, '/compute_ik', callback_group=self.cb_group)
+        self.gripper_client = ActionClient(
+            self, GripperCommand, '/xarm_gripper/gripper_action',
+            callback_group=self.cb_group)
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -209,6 +253,15 @@ class GoTo(Node):
             callback_group=self.cb_group)
 
         self.grab_pub = self.create_publisher(String, '/tool_approach/grab', 5)
+
+        # Visualization: the projected target TCP pose + MarkerArray
+        # showing target position, tag position, and approach arrow.
+        # Consumed by RViz; NOT used by any control logic. Motion still
+        # only happens on keyboard-driven commit.
+        self.target_pose_pub = self.create_publisher(
+            PoseStamped, '/go_to/target_pose', 5)
+        self.viz_pub = self.create_publisher(
+            MarkerArray, '/go_to/viz', 5)
 
         self._tag_sub = None
         self._pixel_sub = None
@@ -230,6 +283,8 @@ class GoTo(Node):
         self._latest_pixel_stamp = None
         self._in_band_count = 0
         self._grab_armed = False
+        self._first_viz_published = False  # one-shot log when viz starts
+        self._step_idx = 0                 # cycled by 's' through STEP_SIZES_M
 
         self.create_timer(
             1.0 / TRACK_RATE_HZ, self._track_tick, callback_group=self.cb_group)
@@ -238,9 +293,16 @@ class GoTo(Node):
 
         if sys.stdin.isatty():
             threading.Thread(target=self._keyboard_loop, daemon=True).start()
+            sizes_str = '/'.join(f'{s*1000:.1f}mm' for s in STEP_SIZES_M)
             self.get_logger().info(
-                'Keyboard: ↓/Enter descend, ↑ raise, g grab, space pause, '
-                'x toggle camera/tcp mode, h home, q quit.')
+                'Keyboard (closed-loop commit): ↓/Enter descend+move, '
+                '↑ raise+move, m commit-move (no z change), '
+                f's cycle step ({sizes_str}), g CLOSE gripper (manual grab), '
+                'o OPEN gripper, x toggle camera/tcp mode, h home, '
+                'space pause viz, q quit. '
+                'Target visualized on /go_to/target_pose + /go_to/viz — '
+                'arm does NOT auto-move; every key press rebuilds IK from '
+                'the live tag pose.')
         else:
             self.get_logger().warn('No TTY — keyboard disabled.')
 
@@ -302,6 +364,7 @@ class GoTo(Node):
             self._latest_pixel_stamp = None
             self._in_band_count = 0
             self._grab_armed = False
+            self._first_viz_published = False
             if self._tag_sub is not None:
                 self.destroy_subscription(self._tag_sub)
                 self._tag_sub = None
@@ -395,6 +458,22 @@ class GoTo(Node):
                             'depth_camera.launch.py and the /fine_loc/tag '
                             'output. Run `ros2 run xarm5_basic_position_cmd '
                             'pose_check` for a side-by-side readout.')
+                    else:
+                        # One-shot banner right after first lock. The
+                        # refactored go_to does NOT auto-move; without
+                        # this prompt a new operator stares at the log
+                        # wondering why the arm is idle.
+                        self.get_logger().warn(
+                            '╔══ LOCKED ON (closed-loop viz ready) ══╗\n'
+                            '║  Arm does NOT auto-move. Target is    ║\n'
+                            '║  published live on /go_to/target_pose ║\n'
+                            '║  + /go_to/viz (MarkerArray).          ║\n'
+                            '║                                       ║\n'
+                            '║  Press  m  → center camera on tag     ║\n'
+                            '║  Press  ↓  → descend 10 mm and move   ║\n'
+                            '║  Press  ↑  → raise   10 mm and move   ║\n'
+                            '║  Press  x  → toggle camera/tcp mode   ║\n'
+                            '╚═══════════════════════════════════════╝')
 
     def _pixel_cb(self, msg):
         v = float(msg.data)
@@ -406,69 +485,212 @@ class GoTo(Node):
 
     # ---------------------- tracking tick ----------------------
 
-    def _track_tick(self):
+    def _compute_target(self):
+        """Snapshot live tag pose → (tcp_x, tcp_y, target_z, tag_yaw, mode).
+
+        Closed-loop: every call reads _latest_tag_pose and recomputes.
+        Returns a dict, or None if we aren't locked yet / the tag sample
+        is stale. Holding the lock only for the pose read; yaw and TCP
+        offset math happen outside the lock.
+        """
         with self._lock:
-            if self._tracking_paused or self._move_in_flight:
-                return
             if self._latest_tag_pose is None or self._target_z is None:
-                return
-            if (time.monotonic() - self._latest_tag_stamp) > 1.5:
-                return  # stale tag — hold pose
-            tag_x = self._latest_tag_pose.pose.position.x
-            tag_y = self._latest_tag_pose.pose.position.y
+                return None
+            if self._latest_tag_stamp is None:
+                return None
+            if (time.monotonic() - self._latest_tag_stamp) > 2.0:
+                return None
+            pose = self._latest_tag_pose
+            tag_x = pose.pose.position.x
+            tag_y = pose.pose.position.y
+            tag_z = pose.pose.position.z
             tag_q = (
-                self._latest_tag_pose.pose.orientation.x,
-                self._latest_tag_pose.pose.orientation.y,
-                self._latest_tag_pose.pose.orientation.z,
-                self._latest_tag_pose.pose.orientation.w,
+                pose.pose.orientation.x, pose.pose.orientation.y,
+                pose.pose.orientation.z, pose.pose.orientation.w,
             )
             target_z = self._target_z
-            last_cmd_tag = self._last_cmd_tag_xy
-            target_tid = self._target_tag_id
             mode = self._target_mode
-
-        # Safety gate: never plan to an XY that's absurdly far from the
-        # current TCP. At hover the camera is roughly above the tag, so
-        # tag XY in link_base should be close to TCP XY; a huge delta
-        # means the pose is bogus and we'd wander off blindly.
-        tcp = self._tcp_position_unsafe()
-        if tcp is not None:
-            d_xy = math.hypot(tag_x - tcp[0], tag_y - tcp[1])
-            if d_xy > SANITY_XY_RADIUS_M:
-                self.get_logger().warn(
-                    f'TRACK blocked: tag XY is {d_xy*1000:.0f}mm from TCP '
-                    f'(>limit {SANITY_XY_RADIUS_M*1000:.0f}mm). '
-                    f'tag=({tag_x*1000:+.0f},{tag_y*1000:+.0f}) '
-                    f'tcp=({tcp[0]*1000:+.0f},{tcp[1]*1000:+.0f}). '
-                    'Fine localization pose looks wrong — not moving.',
-                    throttle_duration_sec=2.0)
-                return
-
-        # Re-plan when the tag XY shifted past the deadband OR no command
-        # has been issued yet. Comparing against the last TAG XY (not last
-        # TCP XY) keeps the deadband meaningful across mode changes.
-        if last_cmd_tag is not None:
-            dx = tag_x - last_cmd_tag[0]
-            dy = tag_y - last_cmd_tag[1]
-            if math.hypot(dx, dy) < XY_DEADBAND_M:
-                return  # within deadband — skip
-        tcp_txt = (f'tcp({tcp[0]*1000:.0f},{tcp[1]*1000:.0f},{tcp[2]*1000:.0f})'
-                   if tcp is not None else 'tcp(?)')
-        tool = TOOL_NAMES.get(target_tid, f'tag{target_tid}')
-        radial_yaw = math.atan2(tag_y, tag_x)
-        # Tag yaw = direction of tag's readable "up" (local −Y) in
-        # link_base. Used verbatim so the camera's image-vertical aligns
-        # with the printed top-of-pattern. No 180° wrap, no axis swap —
-        # AprilTags are non-symmetric and must be respected exactly.
+            target_tid = self._target_tag_id
         tag_yaw = _quat_to_yaw_base(*tag_q)
+        tcp_x, tcp_y = _tcp_for_mode(tag_x, tag_y, tag_yaw, mode)
+        return {
+            'tag_x': tag_x, 'tag_y': tag_y, 'tag_z': tag_z, 'tag_q': tag_q,
+            'tcp_x': tcp_x, 'tcp_y': tcp_y, 'target_z': target_z,
+            'tag_yaw': tag_yaw, 'mode': mode, 'target_tid': target_tid,
+        }
+
+    def _publish_target_viz(self, t):
+        """Publish the projected target TCP pose + MarkerArray for RViz."""
+        stamp = self.get_clock().now().to_msg()
+
+        qx, qy, qz, qw = tool_aligned_quat(t['tcp_x'], t['tcp_y'], t['tag_yaw'])
+
+        p = PoseStamped()
+        p.header.frame_id = FRAME_ID
+        p.header.stamp = stamp
+        p.pose.position.x = t['tcp_x']
+        p.pose.position.y = t['tcp_y']
+        p.pose.position.z = t['target_z']
+        p.pose.orientation.x = qx
+        p.pose.orientation.y = qy
+        p.pose.orientation.z = qz
+        p.pose.orientation.w = qw
+        self.target_pose_pub.publish(p)
+
+        arr = MarkerArray()
+
+        # id=0: SPHERE at target TCP — green = safe / ready to commit.
+        tcp_marker = Marker()
+        tcp_marker.header.frame_id = FRAME_ID
+        tcp_marker.header.stamp = stamp
+        tcp_marker.ns = 'go_to'
+        tcp_marker.id = 0
+        tcp_marker.type = Marker.SPHERE
+        tcp_marker.action = Marker.ADD
+        tcp_marker.pose = p.pose
+        tcp_marker.scale.x = 0.025
+        tcp_marker.scale.y = 0.025
+        tcp_marker.scale.z = 0.025
+        tcp_marker.color = ColorRGBA(r=0.0, g=1.0, b=0.2, a=0.9)
+        arr.markers.append(tcp_marker)
+
+        # id=1: CUBE at the detected tag center (actual tag z, not
+        # target z) — yellow. 25.4 mm physical tag, 3 mm thick for
+        # visibility. Orientation matches the tag so RViz shows which
+        # way "up" points.
+        tag_marker = Marker()
+        tag_marker.header.frame_id = FRAME_ID
+        tag_marker.header.stamp = stamp
+        tag_marker.ns = 'go_to'
+        tag_marker.id = 1
+        tag_marker.type = Marker.CUBE
+        tag_marker.action = Marker.ADD
+        tag_marker.pose.position.x = t['tag_x']
+        tag_marker.pose.position.y = t['tag_y']
+        tag_marker.pose.position.z = t['tag_z']
+        tag_marker.pose.orientation.x = t['tag_q'][0]
+        tag_marker.pose.orientation.y = t['tag_q'][1]
+        tag_marker.pose.orientation.z = t['tag_q'][2]
+        tag_marker.pose.orientation.w = t['tag_q'][3]
+        tag_marker.scale.x = 0.0254
+        tag_marker.scale.y = 0.0254
+        tag_marker.scale.z = 0.003
+        tag_marker.color = ColorRGBA(r=1.0, g=1.0, b=0.0, a=0.9)
+        arr.markers.append(tag_marker)
+
+        # id=2: ARROW from target TCP down toward the tag — blue,
+        # shows the gripper's approach direction.
+        approach = Marker()
+        approach.header.frame_id = FRAME_ID
+        approach.header.stamp = stamp
+        approach.ns = 'go_to'
+        approach.id = 2
+        approach.type = Marker.ARROW
+        approach.action = Marker.ADD
+        approach.points = [
+            p.pose.position,
+            _point(t['tag_x'], t['tag_y'], t['tag_z']),
+        ]
+        approach.scale.x = 0.004   # shaft diameter
+        approach.scale.y = 0.010   # head diameter
+        approach.scale.z = 0.014   # head length
+        approach.color = ColorRGBA(r=0.1, g=0.3, b=1.0, a=0.85)
+        arr.markers.append(approach)
+
+        self.viz_pub.publish(arr)
+
+    def _safety_check(self, tag_x, tag_y):
+        """Reject plans where tag XY is absurdly far from current TCP.
+
+        At hover the camera is roughly above the tag, so tag XY in
+        link_base should be close to TCP XY. A big delta means the
+        fine_localization pose is bogus — refuse to act on it.
+        Returns (ok, d_xy_m, tcp_xyz_or_None).
+        """
+        tcp = self._tcp_position_unsafe()
+        if tcp is None:
+            return True, 0.0, None
+        d_xy = math.hypot(tag_x - tcp[0], tag_y - tcp[1])
+        return d_xy <= SANITY_XY_RADIUS_M, d_xy, tcp
+
+    def _track_tick(self):
+        """Closed-loop visualization tick — NO arm motion here.
+
+        Every tick: read live tag pose, recompute projected target,
+        publish pose + markers for RViz. Motion only fires when the
+        operator presses a key (_adjust_z / _commit_move_to_target).
+        """
+        with self._lock:
+            paused = self._tracking_paused
+        if paused:
+            return
+        t = self._compute_target()
+        if t is None:
+            return
+        ok, d_xy, tcp = self._safety_check(t['tag_x'], t['tag_y'])
+        if not ok:
+            self.get_logger().warn(
+                f'VIZ gate: tag XY is {d_xy*1000:.0f}mm from TCP '
+                f'(>limit {SANITY_XY_RADIUS_M*1000:.0f}mm). '
+                f'tag=({t["tag_x"]*1000:+.0f},{t["tag_y"]*1000:+.0f}) '
+                f'tcp=({tcp[0]*1000:+.0f},{tcp[1]*1000:+.0f}). '
+                'Fine localization pose looks wrong — not publishing viz.',
+                throttle_duration_sec=2.0)
+            return
+        self._publish_target_viz(t)
+        if not self._first_viz_published:
+            self._first_viz_published = True
+            self.get_logger().warn(
+                'VIZ FIRST PUBLISH — /go_to/target_pose + /go_to/viz are '
+                'now live. Refactored closed-loop build IS running. '
+                'Press m/↓/↑ to commit a move.')
+        tool = TOOL_NAMES.get(t['target_tid'], f'tag{t["target_tid"]}')
+        tcp_txt = (f'tcp({tcp[0]*1000:.0f},{tcp[1]*1000:.0f},'
+                   f'{tcp[2]*1000:.0f})' if tcp is not None else 'tcp(?)')
         self.get_logger().info(
-            f'TRACK[{tool}|{mode}] → {tcp_txt} → tag({tag_x*1000:.0f},'
-            f'{tag_y*1000:.0f}) z={target_z*1000:.0f}mm  '
-            f'radial_yaw={math.degrees(radial_yaw):+.0f}°  '
-            f'tag_up_yaw={math.degrees(tag_yaw):+.0f}°')
+            f'VIZ[{tool}|{t["mode"]}] → {tcp_txt} → '
+            f'target_tcp=({t["tcp_x"]*1000:.0f},{t["tcp_y"]*1000:.0f},'
+            f'{t["target_z"]*1000:.0f})mm  '
+            f'tag=({t["tag_x"]*1000:.0f},{t["tag_y"]*1000:.0f},'
+            f'{t["tag_z"]*1000:.0f})mm  '
+            f'tag_up_yaw={math.degrees(t["tag_yaw"]):+.0f}°  '
+            f'radial_yaw={math.degrees(math.atan2(t["tag_y"], t["tag_x"])):+.0f}°',
+            throttle_duration_sec=1.5)
+
+    def _commit_move_to_target(self, reason):
+        """Rebuild IK target from LIVE tag pose and execute the move.
+
+        Called from the keyboard thread on ↓/↑/m. Each call is a fresh
+        closed-loop sample: the cached _last_cmd_* fields are only used
+        by the deadband check inside _track_tick (now vestigial), not
+        by the IK request itself.
+        """
+        with self._lock:
+            in_flight = self._move_in_flight
+        if in_flight:
+            self.get_logger().warn(
+                f'COMMIT[{reason}] ignored — move already in flight.')
+            return
+        t = self._compute_target()
+        if t is None:
+            self.get_logger().warn(
+                f'COMMIT[{reason}] ignored — no tag lock / stale pose.')
+            return
+        ok, d_xy, tcp = self._safety_check(t['tag_x'], t['tag_y'])
+        if not ok:
+            self.get_logger().error(
+                f'COMMIT[{reason}] blocked: tag XY is {d_xy*1000:.0f}mm '
+                f'from TCP (>limit {SANITY_XY_RADIUS_M*1000:.0f}mm). '
+                'Fine localization pose looks wrong — refusing to move.')
+            return
+        self.get_logger().warn(
+            f'COMMIT[{reason}] → tcp_target=({t["tcp_x"]*1000:+.0f},'
+            f'{t["tcp_y"]*1000:+.0f},{t["target_z"]*1000:+.0f})mm '
+            f'mode={t["mode"]} yaw={math.degrees(t["tag_yaw"]):+.0f}°')
         threading.Thread(
             target=self._do_move,
-            args=(tag_x, tag_y, target_z, tag_yaw, mode),
+            args=(t['tag_x'], t['tag_y'], t['target_z'],
+                  t['tag_yaw'], t['mode']),
             daemon=True).start()
 
     def _do_move(self, tag_x, tag_y, z, tag_yaw=None, mode=DEFAULT_TARGET_MODE):
@@ -536,6 +758,8 @@ class GoTo(Node):
                 self._move_in_flight = False
 
     def _adjust_z(self, delta_m):
+        """Step target_z by delta_m and immediately commit a move to the
+        current LIVE target. No waiting for the next track tick."""
         with self._lock:
             if self._initial_tcp_z is None:
                 self.get_logger().warn(
@@ -550,12 +774,16 @@ class GoTo(Node):
                     f'Z {new_z*1000:.0f}mm clamped to {clamped*1000:.0f}mm '
                     f'(range {min_z*1000:.0f}-{max_z*1000:.0f}mm).')
             self._target_z = clamped
-            # Force re-plan on next tick by clearing the last-cmd anchors
-            # (both the TCP command and the tag-XY deadband reference).
+            # Clear deadband anchors — they're vestigial now (tick no
+            # longer auto-moves) but some other code path may still read
+            # them; keep them consistent with "a fresh commit happened".
             self._last_cmd_xy = None
             self._last_cmd_tag_xy = None
+        direction = 'DOWN' if delta_m < 0 else 'UP'
         self.get_logger().info(
-            f'Z step → target_z={self._target_z*1000:.0f}mm (next tick replans).')
+            f'Z step {direction} {abs(delta_m)*1000:.0f}mm → '
+            f'target_z={self._target_z*1000:.0f}mm — committing move.')
+        self._commit_move_to_target(reason=f'z{direction.lower()}')
 
     # ---------------------- grab tick ----------------------
 
@@ -618,6 +846,89 @@ class GoTo(Node):
             self.get_logger().warn('Force-grab ignored: no target tag.')
             return
         self._fire_grab(tid, px, sweet)
+
+    # ---------------------- manual approach controls ----------------------
+
+    def _cycle_step_size(self):
+        """Rotate self._step_idx through STEP_SIZES_M.
+
+        Used while keyboard-positioning the arm over a tool: start coarse
+        (10 mm) to descend quickly, then drop to 5 mm and 1 mm for the
+        final placement before pressing 'g' to close the gripper.
+        """
+        self._step_idx = (self._step_idx + 1) % len(STEP_SIZES_M)
+        sizes_str = ' / '.join(
+            f'{"[" if i == self._step_idx else " "}{s*1000:.1f}mm'
+            f'{"]" if i == self._step_idx else " "}'
+            for i, s in enumerate(STEP_SIZES_M))
+        self.get_logger().warn(
+            f'Approach step → {STEP_SIZES_M[self._step_idx]*1000:.1f}mm   '
+            f'cycle: {sizes_str}')
+
+    def _send_gripper_blocking(self, position, label):
+        """Send a GripperCommand goal and wait for the result.
+
+        Run from a worker thread (the keyboard loop's caller spawns one)
+        so the action wait doesn't block the keyboard reader.
+        """
+        if not self.gripper_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().error(
+                f'GRIPPER[{label}]: action server '
+                '/xarm_gripper/gripper_action not available — '
+                'is the xarm driver up? (T1)')
+            return
+        goal = GripperCommand.Goal()
+        goal.command.position = float(position)
+        goal.command.max_effort = float(GRIPPER_EFFORT)
+        self.get_logger().warn(
+            f'GRIPPER[{label}] → position={position:.3f} '
+            f'effort={GRIPPER_EFFORT:.2f}')
+        event = threading.Event()
+        accepted = [False]
+
+        def on_result(_f):
+            event.set()
+
+        def on_goal(f):
+            gh = f.result()
+            if gh is None or not gh.accepted:
+                self.get_logger().error(
+                    f'GRIPPER[{label}] goal rejected by action server.')
+                event.set()
+                return
+            accepted[0] = True
+            gh.get_result_async().add_done_callback(on_result)
+
+        self.gripper_client.send_goal_async(goal).add_done_callback(on_goal)
+        if not event.wait(timeout=GRIPPER_ACTION_TIMEOUT_S):
+            self.get_logger().warn(f'GRIPPER[{label}] timed out.')
+            return
+        if accepted[0]:
+            self.get_logger().info(f'GRIPPER[{label}] complete.')
+
+    def _grab_close(self):
+        """Manual grab: close the gripper. Operator-driven, no tag check.
+
+        Called when the operator has visually positioned the arm over the
+        tool with the keyboard. Also marks tracking paused + grab_armed
+        so the auto-grab path doesn't re-fire on top of us.
+        """
+        with self._lock:
+            self._grab_armed = True
+            self._tracking_paused = True
+        threading.Thread(
+            target=self._send_gripper_blocking,
+            args=(GRIPPER_CLOSE_POS, 'CLOSE'),
+            daemon=True).start()
+
+    def _grab_open(self):
+        """Open the gripper to release / reset between manual attempts."""
+        with self._lock:
+            self._grab_armed = False
+        threading.Thread(
+            target=self._send_gripper_blocking,
+            args=(GRIPPER_OPEN_POS, 'OPEN'),
+            daemon=True).start()
 
     # ---------------------- home ----------------------
 
@@ -759,21 +1070,28 @@ class GoTo(Node):
                 if not select.select([sys.stdin], [], [], 0.1)[0]:
                     continue
                 c = sys.stdin.read(1)
+                step = STEP_SIZES_M[self._step_idx]
                 if c == '\x1b':
                     seq = sys.stdin.read(2)
                     if seq == '[A':
-                        self._adjust_z(+STEP_M)
+                        self._adjust_z(+step)
                     elif seq == '[B':
-                        self._adjust_z(-STEP_M)
+                        self._adjust_z(-step)
                 elif c in ('\r', '\n'):
-                    self._adjust_z(-STEP_M)
+                    self._adjust_z(-step)
                 elif c == ' ':
                     with self._lock:
                         self._tracking_paused = not self._tracking_paused
                     self.get_logger().info(
                         f'Tracking {"PAUSED" if self._tracking_paused else "RESUMED"}.')
+                elif c == 's':
+                    self._cycle_step_size()
                 elif c == 'g':
-                    self._force_grab()
+                    self._grab_close()
+                elif c == 'o':
+                    self._grab_open()
+                elif c == 'm':
+                    self._commit_move_to_target(reason='manual')
                 elif c == 'x':
                     self._toggle_target_mode()
                 elif c == 'h':

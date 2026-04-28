@@ -17,9 +17,11 @@
   <!-- Runtime dependencies -->
   <exec_depend>rclpy</exec_depend>
   <exec_depend>xarm_msgs</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
   <exec_depend>moveit_msgs</exec_depend>
   <exec_depend>shape_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
   <exec_depend>xarm_moveit_config</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>tf2_geometry_msgs</exec_depend>
