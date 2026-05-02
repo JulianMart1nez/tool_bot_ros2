@@ -1,0 +1,27 @@
+/move_group_private_95827979235296
+  Subscribers:
+    /attached_collision_object: moveit_msgs/msg/AttachedCollisionObject
+    /collision_object: moveit_msgs/msg/CollisionObject
+    /joint_states: sensor_msgs/msg/JointState
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /planning_scene: moveit_msgs/msg/PlanningScene
+    /planning_scene_world: moveit_msgs/msg/PlanningSceneWorld
+  Publishers:
+    /monitored_planning_scene: moveit_msgs/msg/PlanningScene
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+  Service Servers:
+    /get_planning_scene: moveit_msgs/srv/GetPlanningScene
+    /move_group_private_95827979235296/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /move_group_private_95827979235296/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /move_group_private_95827979235296/get_parameters: rcl_interfaces/srv/GetParameters
+    /move_group_private_95827979235296/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /move_group_private_95827979235296/list_parameters: rcl_interfaces/srv/ListParameters
+    /move_group_private_95827979235296/set_parameters: rcl_interfaces/srv/SetParameters
+    /move_group_private_95827979235296/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+
+  Action Servers:
+
+  Action Clients:
+

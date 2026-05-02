@@ -1,0 +1,21 @@
+/static_transform_publisher
+  Subscribers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+  Publishers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+    /tf_static: tf2_msgs/msg/TFMessage
+  Service Servers:
+    /static_transform_publisher/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /static_transform_publisher/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /static_transform_publisher/get_parameters: rcl_interfaces/srv/GetParameters
+    /static_transform_publisher/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /static_transform_publisher/list_parameters: rcl_interfaces/srv/ListParameters
+    /static_transform_publisher/set_parameters: rcl_interfaces/srv/SetParameters
+    /static_transform_publisher/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+
+  Action Servers:
+
+  Action Clients:
+

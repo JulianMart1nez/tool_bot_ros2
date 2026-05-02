@@ -1,0 +1,22 @@
+There are 2 nodes in the graph with the exact name "/gripper_camera_tf". You are seeing information about only one of them.
+/gripper_camera_tf
+  Subscribers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+  Publishers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+    /tf_static: tf2_msgs/msg/TFMessage
+  Service Servers:
+    /gripper_camera_tf/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /gripper_camera_tf/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /gripper_camera_tf/get_parameters: rcl_interfaces/srv/GetParameters
+    /gripper_camera_tf/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /gripper_camera_tf/list_parameters: rcl_interfaces/srv/ListParameters
+    /gripper_camera_tf/set_parameters: rcl_interfaces/srv/SetParameters
+    /gripper_camera_tf/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+
+  Action Servers:
+
+  Action Clients:
+

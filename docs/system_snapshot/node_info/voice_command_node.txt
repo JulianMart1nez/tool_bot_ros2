@@ -1,0 +1,23 @@
+/voice_command_node
+  Subscribers:
+
+  Publishers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+    /voice_command/home_request: std_msgs/msg/String
+    /voice_command/raw_text: std_msgs/msg/String
+    /voice_command/tool_request: std_msgs/msg/String
+  Service Servers:
+    /voice_command_node/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /voice_command_node/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /voice_command_node/get_parameters: rcl_interfaces/srv/GetParameters
+    /voice_command_node/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /voice_command_node/list_parameters: rcl_interfaces/srv/ListParameters
+    /voice_command_node/set_parameters: rcl_interfaces/srv/SetParameters
+    /voice_command_node/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+
+  Action Servers:
+
+  Action Clients:
+

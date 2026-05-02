@@ -1,0 +1,20 @@
+/moveit_361872666
+  Subscribers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+  Publishers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+  Service Servers:
+    /moveit_361872666/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /moveit_361872666/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /moveit_361872666/get_parameters: rcl_interfaces/srv/GetParameters
+    /moveit_361872666/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /moveit_361872666/list_parameters: rcl_interfaces/srv/ListParameters
+    /moveit_361872666/set_parameters: rcl_interfaces/srv/SetParameters
+    /moveit_361872666/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+
+  Action Servers:
+
+  Action Clients:
+

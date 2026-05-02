@@ -1,0 +1,22 @@
+/interactive_marker_display_101828253133936
+  Subscribers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rviz_moveit_motion_planning_display/robot_interaction_interactive_marker_topic/update: visualization_msgs/msg/InteractiveMarkerUpdate
+  Publishers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+    /rviz_moveit_motion_planning_display/robot_interaction_interactive_marker_topic/feedback: visualization_msgs/msg/InteractiveMarkerFeedback
+  Service Servers:
+    /interactive_marker_display_101828253133936/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /interactive_marker_display_101828253133936/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /interactive_marker_display_101828253133936/get_parameters: rcl_interfaces/srv/GetParameters
+    /interactive_marker_display_101828253133936/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /interactive_marker_display_101828253133936/list_parameters: rcl_interfaces/srv/ListParameters
+    /interactive_marker_display_101828253133936/set_parameters: rcl_interfaces/srv/SetParameters
+    /interactive_marker_display_101828253133936/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+    /rviz_moveit_motion_planning_display/robot_interaction_interactive_marker_topic/get_interactive_markers: visualization_msgs/srv/GetInteractiveMarkers
+  Action Servers:
+
+  Action Clients:
+

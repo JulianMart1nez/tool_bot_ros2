@@ -1,0 +1,22 @@
+/ufactory_robot_hw
+  Subscribers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+  Publishers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+    /rviz/moveit/update_goal_state: std_msgs/msg/Empty
+  Service Servers:
+    /ufactory_robot_hw/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /ufactory_robot_hw/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /ufactory_robot_hw/get_parameters: rcl_interfaces/srv/GetParameters
+    /ufactory_robot_hw/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /ufactory_robot_hw/list_parameters: rcl_interfaces/srv/ListParameters
+    /ufactory_robot_hw/set_parameters: rcl_interfaces/srv/SetParameters
+    /ufactory_robot_hw/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+    /controller_manager/list_controllers: controller_manager_msgs/srv/ListControllers
+    /controller_manager/switch_controller: controller_manager_msgs/srv/SwitchController
+  Action Servers:
+
+  Action Clients:
+

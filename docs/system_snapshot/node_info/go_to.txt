@@ -1,0 +1,29 @@
+/go_to
+  Subscribers:
+    /detect_zone/complete: std_msgs/msg/String
+    /tf: tf2_msgs/msg/TFMessage
+    /tf_static: tf2_msgs/msg/TFMessage
+    /voice_command/home_request: std_msgs/msg/String
+    /voice_command/tool_request: std_msgs/msg/String
+  Publishers:
+    /go_to/target_pose: geometry_msgs/msg/PoseStamped
+    /go_to/viz: visualization_msgs/msg/MarkerArray
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+    /tool_approach/grab: std_msgs/msg/String
+  Service Servers:
+    /go_to/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /go_to/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /go_to/get_parameters: rcl_interfaces/srv/GetParameters
+    /go_to/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /go_to/list_parameters: rcl_interfaces/srv/ListParameters
+    /go_to/set_parameters: rcl_interfaces/srv/SetParameters
+    /go_to/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+    /apply_planning_scene: moveit_msgs/srv/ApplyPlanningScene
+    /compute_ik: moveit_msgs/srv/GetPositionIK
+  Action Servers:
+
+  Action Clients:
+    /move_action: moveit_msgs/action/MoveGroup
+    /xarm_gripper/gripper_action: control_msgs/action/GripperCommand

@@ -1,0 +1,26 @@
+/xarm5_traj_controller
+  Subscribers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /xarm5_traj_controller/joint_trajectory: trajectory_msgs/msg/JointTrajectory
+  Publishers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+    /xarm5_traj_controller/controller_state: control_msgs/msg/JointTrajectoryControllerState
+    /xarm5_traj_controller/transition_event: lifecycle_msgs/msg/TransitionEvent
+  Service Servers:
+    /xarm5_traj_controller/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /xarm5_traj_controller/get_logger_levels: rcl_interfaces/srv/GetLoggerLevels
+    /xarm5_traj_controller/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /xarm5_traj_controller/get_parameters: rcl_interfaces/srv/GetParameters
+    /xarm5_traj_controller/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /xarm5_traj_controller/list_parameters: rcl_interfaces/srv/ListParameters
+    /xarm5_traj_controller/query_state: control_msgs/srv/QueryTrajectoryState
+    /xarm5_traj_controller/set_logger_levels: rcl_interfaces/srv/SetLoggerLevels
+    /xarm5_traj_controller/set_parameters: rcl_interfaces/srv/SetParameters
+    /xarm5_traj_controller/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+
+  Action Servers:
+    /xarm5_traj_controller/follow_joint_trajectory: control_msgs/action/FollowJointTrajectory
+  Action Clients:
+

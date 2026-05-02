@@ -1,0 +1,24 @@
+/detect_zone
+  Subscribers:
+    /gripper_cam/depth_camera/color/camera_info: sensor_msgs/msg/CameraInfo
+    /gripper_cam/depth_camera/color/image_raw: sensor_msgs/msg/Image
+    /voice_command/tool_request: std_msgs/msg/String
+  Publishers:
+    /detect_zone/complete: std_msgs/msg/String
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+    /tool_pose: geometry_msgs/msg/PoseStamped
+  Service Servers:
+    /detect_zone/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /detect_zone/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /detect_zone/get_parameters: rcl_interfaces/srv/GetParameters
+    /detect_zone/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /detect_zone/list_parameters: rcl_interfaces/srv/ListParameters
+    /detect_zone/set_parameters: rcl_interfaces/srv/SetParameters
+    /detect_zone/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+
+  Action Servers:
+
+  Action Clients:
+    /move_action: moveit_msgs/action/MoveGroup

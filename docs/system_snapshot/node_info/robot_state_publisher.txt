@@ -1,0 +1,24 @@
+/robot_state_publisher
+  Subscribers:
+    /joint_states: sensor_msgs/msg/JointState
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+  Publishers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /robot_description: std_msgs/msg/String
+    /rosout: rcl_interfaces/msg/Log
+    /tf: tf2_msgs/msg/TFMessage
+    /tf_static: tf2_msgs/msg/TFMessage
+  Service Servers:
+    /robot_state_publisher/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /robot_state_publisher/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /robot_state_publisher/get_parameters: rcl_interfaces/srv/GetParameters
+    /robot_state_publisher/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /robot_state_publisher/list_parameters: rcl_interfaces/srv/ListParameters
+    /robot_state_publisher/set_parameters: rcl_interfaces/srv/SetParameters
+    /robot_state_publisher/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+
+  Action Servers:
+
+  Action Clients:
+

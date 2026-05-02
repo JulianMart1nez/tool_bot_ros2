@@ -1,0 +1,6 @@
+/bio_gripper/gripper_action
+/execute_trajectory
+/gripper_cam/depth_camera/triggered_calibration
+/move_action
+/xarm5_traj_controller/follow_joint_trajectory
+/xarm_gripper/gripper_action

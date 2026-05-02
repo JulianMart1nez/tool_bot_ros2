@@ -1,0 +1,35 @@
+/fine_localization
+  Subscribers:
+    /gripper_cam/depth_camera/aligned_depth_to_color/image_raw: sensor_msgs/msg/Image
+    /gripper_cam/depth_camera/color/camera_info: sensor_msgs/msg/CameraInfo
+    /gripper_cam/depth_camera/color/image_raw: sensor_msgs/msg/Image
+    /tf: tf2_msgs/msg/TFMessage
+    /tf_static: tf2_msgs/msg/TFMessage
+  Publishers:
+    /fine_loc/result: geometry_msgs/msg/PoseStamped
+    /fine_loc/tag_2: geometry_msgs/msg/PoseStamped
+    /fine_loc/tag_2/depth: std_msgs/msg/Float32
+    /fine_loc/tag_2/pixel_size: std_msgs/msg/Float32
+    /fine_loc/tag_3: geometry_msgs/msg/PoseStamped
+    /fine_loc/tag_3/depth: std_msgs/msg/Float32
+    /fine_loc/tag_3/pixel_size: std_msgs/msg/Float32
+    /fine_loc/tag_4: geometry_msgs/msg/PoseStamped
+    /fine_loc/tag_4/depth: std_msgs/msg/Float32
+    /fine_loc/tag_4/pixel_size: std_msgs/msg/Float32
+    /fine_loc/tag_detected: std_msgs/msg/Bool
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+  Service Servers:
+    /fine_localization/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /fine_localization/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /fine_localization/get_parameters: rcl_interfaces/srv/GetParameters
+    /fine_localization/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /fine_localization/list_parameters: rcl_interfaces/srv/ListParameters
+    /fine_localization/set_parameters: rcl_interfaces/srv/SetParameters
+    /fine_localization/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+
+  Action Servers:
+
+  Action Clients:
+

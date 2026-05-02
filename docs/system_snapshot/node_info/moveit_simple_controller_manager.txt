@@ -1,0 +1,21 @@
+/moveit_simple_controller_manager
+  Subscribers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+  Publishers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+  Service Servers:
+    /moveit_simple_controller_manager/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /moveit_simple_controller_manager/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /moveit_simple_controller_manager/get_parameters: rcl_interfaces/srv/GetParameters
+    /moveit_simple_controller_manager/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /moveit_simple_controller_manager/list_parameters: rcl_interfaces/srv/ListParameters
+    /moveit_simple_controller_manager/set_parameters: rcl_interfaces/srv/SetParameters
+    /moveit_simple_controller_manager/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+
+  Action Servers:
+
+  Action Clients:
+    /xarm5_traj_controller/follow_joint_trajectory: control_msgs/action/FollowJointTrajectory
+    /xarm_gripper/gripper_action: control_msgs/action/GripperCommand

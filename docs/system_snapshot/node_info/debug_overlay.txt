@@ -1,0 +1,21 @@
+/debug_overlay
+  Subscribers:
+    /gripper_cam/depth_camera/color/image_raw: sensor_msgs/msg/Image
+  Publishers:
+    /debug/overlay: sensor_msgs/msg/Image
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+  Service Servers:
+    /debug_overlay/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /debug_overlay/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /debug_overlay/get_parameters: rcl_interfaces/srv/GetParameters
+    /debug_overlay/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /debug_overlay/list_parameters: rcl_interfaces/srv/ListParameters
+    /debug_overlay/set_parameters: rcl_interfaces/srv/SetParameters
+    /debug_overlay/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+
+  Action Servers:
+
+  Action Clients:
+

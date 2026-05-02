@@ -1,0 +1,40 @@
+/ufactory_driver
+  Subscribers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /xarm/vc_set_cartesian_velocity: xarm_msgs/msg/MoveVelocity
+    /xarm/vc_set_joint_velocity: xarm_msgs/msg/MoveVelocity
+  Publishers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+    /xarm/joint_states: sensor_msgs/msg/JointState
+    /xarm/robot_states: xarm_msgs/msg/RobotMsg
+    /xarm/uf_ftsensor_ext_states: geometry_msgs/msg/WrenchStamped
+    /xarm/uf_ftsensor_raw_states: geometry_msgs/msg/WrenchStamped
+    /xarm/xarm_cgpio_states: xarm_msgs/msg/CIOState
+  Service Servers:
+    /ufactory_driver/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /ufactory_driver/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /ufactory_driver/get_parameters: rcl_interfaces/srv/GetParameters
+    /ufactory_driver/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /ufactory_driver/list_parameters: rcl_interfaces/srv/ListParameters
+    /ufactory_driver/set_parameters: rcl_interfaces/srv/SetParameters
+    /ufactory_driver/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+    /xarm/clean_error: xarm_msgs/srv/Call
+    /xarm/clean_warn: xarm_msgs/srv/Call
+    /xarm/get_servo_angle: xarm_msgs/srv/GetFloat32List
+    /xarm/motion_enable: xarm_msgs/srv/SetInt16ById
+    /xarm/move_gohome: xarm_msgs/srv/MoveHome
+    /xarm/set_mode: xarm_msgs/srv/SetInt16
+    /xarm/set_position: xarm_msgs/srv/MoveCartesian
+    /xarm/set_servo_angle: xarm_msgs/srv/MoveJoint
+    /xarm/set_servo_angle_j: xarm_msgs/srv/MoveJoint
+    /xarm/set_state: xarm_msgs/srv/SetInt16
+    /xarm/vc_set_cartesian_velocity: xarm_msgs/srv/MoveVelocity
+    /xarm/vc_set_joint_velocity: xarm_msgs/srv/MoveVelocity
+  Service Clients:
+
+  Action Servers:
+    /bio_gripper/gripper_action: control_msgs/action/GripperCommand
+    /xarm_gripper/gripper_action: control_msgs/action/GripperCommand
+  Action Clients:
+

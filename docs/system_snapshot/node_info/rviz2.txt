@@ -1,0 +1,49 @@
+There are 2 nodes in the graph with the exact name "/rviz2". You are seeing information about only one of them.
+/rviz2
+  Subscribers:
+    /display_planned_path: moveit_msgs/msg/DisplayTrajectory
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /recognized_object_array: object_recognition_msgs/msg/RecognizedObjectArray
+    /robot_description: std_msgs/msg/String
+    /rviz/moveit/execute: std_msgs/msg/Empty
+    /rviz/moveit/move_marker/goal_link_tcp: geometry_msgs/msg/PoseStamped
+    /rviz/moveit/plan: std_msgs/msg/Empty
+    /rviz/moveit/select_planning_group: std_msgs/msg/String
+    /rviz/moveit/stop: std_msgs/msg/Empty
+    /rviz/moveit/update_custom_goal_state: moveit_msgs/msg/RobotState
+    /rviz/moveit/update_custom_start_state: moveit_msgs/msg/RobotState
+    /rviz/moveit/update_goal_state: std_msgs/msg/Empty
+    /rviz/moveit/update_start_state: std_msgs/msg/Empty
+    /rviz_moveit_motion_planning_display/robot_interaction_interactive_marker_topic/feedback: visualization_msgs/msg/InteractiveMarkerFeedback
+  Publishers:
+    /attached_collision_object: moveit_msgs/msg/AttachedCollisionObject
+    /clicked_point: geometry_msgs/msg/PointStamped
+    /goal_pose: geometry_msgs/msg/PoseStamped
+    /initialpose: geometry_msgs/msg/PoseWithCovarianceStamped
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /planning_scene: moveit_msgs/msg/PlanningScene
+    /planning_scene_world: moveit_msgs/msg/PlanningSceneWorld
+    /rosout: rcl_interfaces/msg/Log
+    /rviz_moveit_motion_planning_display/robot_interaction_interactive_marker_topic/update: visualization_msgs/msg/InteractiveMarkerUpdate
+    /trajectory_execution_event: std_msgs/msg/String
+  Service Servers:
+    /rviz2/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /rviz2/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /rviz2/get_parameters: rcl_interfaces/srv/GetParameters
+    /rviz2/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /rviz2/list_parameters: rcl_interfaces/srv/ListParameters
+    /rviz2/reset_time: std_srvs/srv/Empty
+    /rviz2/set_parameters: rcl_interfaces/srv/SetParameters
+    /rviz2/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+    /rviz_moveit_motion_planning_display/robot_interaction_interactive_marker_topic/get_interactive_markers: visualization_msgs/srv/GetInteractiveMarkers
+  Service Clients:
+    /clear_octomap: std_srvs/srv/Empty
+    /compute_cartesian_path: moveit_msgs/srv/GetCartesianPath
+    /get_planner_params: moveit_msgs/srv/GetPlannerParams
+    /query_planner_interface: moveit_msgs/srv/QueryPlannerInterfaces
+    /set_planner_params: moveit_msgs/srv/SetPlannerParams
+  Action Servers:
+
+  Action Clients:
+    /execute_trajectory: moveit_msgs/action/ExecuteTrajectory
+    /move_action: moveit_msgs/action/MoveGroup

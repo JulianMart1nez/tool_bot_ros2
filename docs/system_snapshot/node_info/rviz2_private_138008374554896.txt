@@ -1,0 +1,21 @@
+/rviz2_private_138008374554896
+  Subscribers:
+    /monitored_planning_scene: moveit_msgs/msg/PlanningScene
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+  Publishers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+  Service Servers:
+    /rviz2_private_138008374554896/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /rviz2_private_138008374554896/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /rviz2_private_138008374554896/get_parameters: rcl_interfaces/srv/GetParameters
+    /rviz2_private_138008374554896/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /rviz2_private_138008374554896/list_parameters: rcl_interfaces/srv/ListParameters
+    /rviz2_private_138008374554896/set_parameters: rcl_interfaces/srv/SetParameters
+    /rviz2_private_138008374554896/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+
+  Action Servers:
+
+  Action Clients:
+

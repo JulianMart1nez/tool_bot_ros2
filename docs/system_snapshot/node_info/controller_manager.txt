@@ -1,0 +1,42 @@
+/controller_manager
+  Subscribers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /robot_description: std_msgs/msg/String
+  Publishers:
+    /controller_manager/activity: controller_manager_msgs/msg/ControllerManagerActivity
+    /controller_manager/introspection_data/full: pal_statistics_msgs/msg/Statistics
+    /controller_manager/introspection_data/names: pal_statistics_msgs/msg/StatisticsNames
+    /controller_manager/introspection_data/values: pal_statistics_msgs/msg/StatisticsValues
+    /controller_manager/statistics/full: pal_statistics_msgs/msg/Statistics
+    /controller_manager/statistics/names: pal_statistics_msgs/msg/StatisticsNames
+    /controller_manager/statistics/values: pal_statistics_msgs/msg/StatisticsValues
+    /diagnostics: diagnostic_msgs/msg/DiagnosticArray
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+  Service Servers:
+    /controller_manager/cleanup_controller: controller_manager_msgs/srv/CleanupController
+    /controller_manager/configure_controller: controller_manager_msgs/srv/ConfigureController
+    /controller_manager/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /controller_manager/get_logger_levels: rcl_interfaces/srv/GetLoggerLevels
+    /controller_manager/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /controller_manager/get_parameters: rcl_interfaces/srv/GetParameters
+    /controller_manager/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /controller_manager/list_controller_types: controller_manager_msgs/srv/ListControllerTypes
+    /controller_manager/list_controllers: controller_manager_msgs/srv/ListControllers
+    /controller_manager/list_hardware_components: controller_manager_msgs/srv/ListHardwareComponents
+    /controller_manager/list_hardware_interfaces: controller_manager_msgs/srv/ListHardwareInterfaces
+    /controller_manager/list_parameters: rcl_interfaces/srv/ListParameters
+    /controller_manager/load_controller: controller_manager_msgs/srv/LoadController
+    /controller_manager/reload_controller_libraries: controller_manager_msgs/srv/ReloadControllerLibraries
+    /controller_manager/set_hardware_component_state: controller_manager_msgs/srv/SetHardwareComponentState
+    /controller_manager/set_logger_levels: rcl_interfaces/srv/SetLoggerLevels
+    /controller_manager/set_parameters: rcl_interfaces/srv/SetParameters
+    /controller_manager/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+    /controller_manager/switch_controller: controller_manager_msgs/srv/SwitchController
+    /controller_manager/unload_controller: controller_manager_msgs/srv/UnloadController
+  Service Clients:
+
+  Action Servers:
+
+  Action Clients:
+
