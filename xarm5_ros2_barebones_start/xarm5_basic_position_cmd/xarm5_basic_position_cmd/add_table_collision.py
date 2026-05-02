@@ -49,30 +49,40 @@ TABLE_CENTER_X = -TABLE_SIZE_X / 2.0
 TABLE_CENTER_Y = 0.0
 TABLE_CENTER_Z = -0.00889 - TABLE_SIZE_Z / 2.0
 
-# Cart surface height: 3.35 in below link_base (adjusted from measurement)
-CART_TOP_Z = -3.35 * IN  # -0.08509 m
+# Per-cart top surface z below link_base. Pickup was measured directly
+# (closed gripper tip touched to cart surface, link_tcp z read off Studio
+# = -3.07 in). Dropoff is left at the previously-working -5.00 in — the
+# drop sequence removes the dropoff_cart collision before the per-tool
+# drop pose, so the modeled height there only affects RViz visualization
+# and the pre-drop hover-transit clearance, not the drop pose itself.
+PICKUP_TOP_Z = -3.07 * IN + 0.002  # -0.07598 m  (user-measured -3.07in,
+                                    # then raised 2 mm so the gripper
+                                    # geometry at grab pose clears the
+                                    # modeled cart slab.)
+DROPOFF_TOP_Z = -5.00 * IN  # -0.12700 m
+
 CART_HEIGHT = 31.0 * IN   # 0.7874 m
 CART_THICKNESS = 0.025     # model cart top as 2.5cm thick slab
 
 # Both carts: near edge at 18in from base, touching at y=0
 CART_NEAR_EDGE_X = 18.0 * IN  # 0.4572 m
 
-# Pickup cart (LEFT of robot, +y): 24in long × 18in wide
+# Pickup cart (LEFT of robot, +y, counterclockwise J1): 24in long × 18in
+# wide. Flat slab at PICKUP_TOP_Z — no rim model. The 4 outer corners
+# of the cart surface are flush with that z.
 PICKUP_SIZE_X = 24.0 * IN
 PICKUP_SIZE_Y = 18.0 * IN
-PICKUP_CENTER_X = CART_NEAR_EDGE_X + PICKUP_SIZE_X / 2.0  # 18+12 = 30in
-PICKUP_CENTER_Y = PICKUP_SIZE_Y / 2.0                      # 0 to +18in, center at +9in
-PICKUP_CENTER_Z = CART_TOP_Z - CART_THICKNESS / 2.0
+PICKUP_CENTER_X = CART_NEAR_EDGE_X + PICKUP_SIZE_X / 2.0
+PICKUP_CENTER_Y = PICKUP_SIZE_Y / 2.0
+PICKUP_CENTER_Z = PICKUP_TOP_Z - CART_THICKNESS / 2.0
 
-# Dropoff cart (RIGHT of robot, -y): 34in long × 17.5in wide
-# Has a 1.5in rim above cart surface — model as taller slab so MoveIt avoids the rim
-DROPOFF_RIM_HEIGHT = 1.5 * IN  # 0.0381 m
+# Dropoff cart (RIGHT of robot, -y, clockwise J1): 34in long × 17.5in
+# wide. Flat slab at DROPOFF_TOP_Z, no rim.
 DROPOFF_SIZE_X = 34.0 * IN
 DROPOFF_SIZE_Y = 17.5 * IN
-DROPOFF_SLAB_Z = CART_THICKNESS + DROPOFF_RIM_HEIGHT  # total height of collision box
-DROPOFF_CENTER_X = CART_NEAR_EDGE_X + DROPOFF_SIZE_X / 2.0  # 18+17 = 35in
-DROPOFF_CENTER_Y = -DROPOFF_SIZE_Y / 2.0                     # -17.5in to 0, center at -8.75in
-DROPOFF_CENTER_Z = CART_TOP_Z + DROPOFF_RIM_HEIGHT / 2.0 - CART_THICKNESS / 2.0
+DROPOFF_CENTER_X = CART_NEAR_EDGE_X + DROPOFF_SIZE_X / 2.0
+DROPOFF_CENTER_Y = -DROPOFF_SIZE_Y / 2.0
+DROPOFF_CENTER_Z = DROPOFF_TOP_Z - CART_THICKNESS / 2.0
 
 
 def _make_box(obj_id, size_x, size_y, size_z, cx, cy, cz):
@@ -121,7 +131,7 @@ class TableAdder(Node):
                            PICKUP_CENTER_X, PICKUP_CENTER_Y, PICKUP_CENTER_Z)
 
         dropoff = _make_box('dropoff_cart',
-                            DROPOFF_SIZE_X, DROPOFF_SIZE_Y, DROPOFF_SLAB_Z,
+                            DROPOFF_SIZE_X, DROPOFF_SIZE_Y, CART_THICKNESS,
                             DROPOFF_CENTER_X, DROPOFF_CENTER_Y, DROPOFF_CENTER_Z)
 
         scene = PlanningScene()

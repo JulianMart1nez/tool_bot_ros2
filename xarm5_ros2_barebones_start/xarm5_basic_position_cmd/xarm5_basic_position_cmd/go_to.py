@@ -31,7 +31,6 @@ Behaviour after detect_zone hovers over the pickup zone:
     m         : commit move to current displayed target (no z change)
     g         : CLOSE gripper (manual grab) via /xarm_gripper/gripper_action
     o         : OPEN  gripper (release / reset between manual attempts)
-    x         : toggle target mode (camera ↔ tcp)
     space     : pause/resume target publishing
     h         : send arm home (all joints zero)
     q         : quit
@@ -73,12 +72,14 @@ from rclpy.node import Node
 import tf2_ros
 
 from control_msgs.action import GripperCommand
-from geometry_msgs.msg import Point, PoseStamped
+from geometry_msgs.msg import Point, Pose, PoseStamped
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import (
-    Constraints, JointConstraint, MotionPlanRequest, PositionIKRequest,
+    CollisionObject, Constraints, JointConstraint, MotionPlanRequest,
+    PlanningScene, PlanningSceneWorld, PositionIKRequest,
 )
-from moveit_msgs.srv import GetPositionIK
+from moveit_msgs.srv import ApplyPlanningScene, GetPositionIK
+from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import ColorRGBA, Float32, String
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -86,10 +87,82 @@ from visualization_msgs.msg import Marker, MarkerArray
 PLANNING_GROUP = 'xarm5'
 FRAME_ID = 'link_base'
 JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5']
-SAFETY_Z_FLOOR = -0.110
+SAFETY_Z_FLOOR = -3.07 * 0.0254 + 0.002  # = PICKUP_TOP_Z (-75.98 mm).
+# Tied to the modeled pickup cart top — TCP cannot be commanded any
+# lower than this. Was -0.110 m, which let the gripper drive 34 mm
+# past the cart surface and physically hit the table before the
+# clamp engaged. Safety margin: PICKUP_TOP_Z is already 2 mm above
+# the user-measured real surface, so this gives 2 mm of clearance
+# for any closed-finger overhang past link_tcp.
 TOOL_TAG_IDS = (2, 3, 4)
 TOOL_NAMES = {2: 'phillips', 3: 'hammer', 4: 'flathead'}
 HOME_JOINTS = (0.0, 0.0, 0.0, 0.0, 0.0)
+
+# Hover-over-dropoff joint pose. Mirror of detect_zone's HOVER_PICKUP
+# (dropoff cart sits at -Y, mirrored across the base's X axis: J1 and
+# J5 negated, the pitch joints unchanged). The dropoff sequence routes
+# through here FIRST so the arm enters the dropoff cart from a known
+# safe-transit pose, regardless of where the pickup hand-off left the
+# arm. Per-tool drop poses below are reached by joint-move FROM here.
+HOVER_DROPOFF_JOINTS_DEG = (-23.0, 23.0, -130.0, 107.0, -23.0)
+HOVER_DROPOFF_JOINTS = tuple(math.radians(d) for d in HOVER_DROPOFF_JOINTS_DEG)
+
+# Per-tool final drop pose (J1..J5 in degrees). Looked up by the
+# fiducial id of the most recently grabbed tool. Keys not present here
+# fall through to "stay at HOVER_DROPOFF and let the operator descend
+# manually with ↓/↑ + o" — useful while a per-tool pose is being
+# calibrated. Operator workflow to calibrate a new tool: jog the arm
+# in xArm Studio to the desired drop pose for that tool, read off
+# J1..J5, add an entry below, rebuild.
+DROP_POS_BY_FID_DEG = {
+    3: (-33.7, 36.4, -53.7, 16.4, -123.1),   # hammer
+    2: (-27.9, 50.5, -83.3, 33.4, -116.9),   # phillips screwdriver
+    4: (-23.6, 67.1, -117.2, 49.5, -112.5),  # flathead screwdriver
+}
+DROP_POS_BY_FID = {
+    fid: tuple(math.radians(d) for d in pose)
+    for fid, pose in DROP_POS_BY_FID_DEG.items()
+}
+
+# dropoff_cart collision geometry — must match add_table_collision.py.
+# We REMOVE this object before commanding the per-tool drop pose
+# (the gripper is supposed to enter the cart's bounding volume to
+# place the tool) and re-ADD it after retreating to HOVER_DROPOFF.
+# Without this, MoveIt rejects every drop pose that descends into
+# the cart's rim and the dropoff sequence silently strands the arm
+# at hover.
+_IN = 0.0254
+_PICKUP_TOP_Z = -3.07 * _IN + 0.002  # must match add_table_collision.PICKUP_TOP_Z
+_DROPOFF_TOP_Z = -5.00 * _IN  # must match add_table_collision.DROPOFF_TOP_Z
+_CART_THICKNESS = 0.025
+_PICKUP_CART = {
+    'frame': 'link_base',
+    'id': 'pickup_cart',
+    'size': (
+        24.0 * _IN,
+        18.0 * _IN,
+        _CART_THICKNESS,
+    ),
+    'center': (
+        18.0 * _IN + (24.0 * _IN) / 2.0,
+        (18.0 * _IN) / 2.0,
+        _PICKUP_TOP_Z - _CART_THICKNESS / 2.0,
+    ),
+}
+_DROPOFF_CART = {
+    'frame': 'link_base',
+    'id': 'dropoff_cart',
+    'size': (
+        34.0 * _IN,
+        17.5 * _IN,
+        _CART_THICKNESS,
+    ),
+    'center': (
+        18.0 * _IN + (34.0 * _IN) / 2.0,
+        -(17.5 * _IN) / 2.0,
+        _DROPOFF_TOP_Z - _CART_THICKNESS / 2.0,
+    ),
+}
 
 STEP_M = 0.010
 # Cycled by the 's' key during final approach. Order = the rotation order
@@ -105,21 +178,17 @@ GRIPPER_CLOSE_POS = 0.85
 GRIPPER_EFFORT = 0.0
 GRIPPER_ACTION_TIMEOUT_S = 10.0
 
-MAX_DOWN_M = 0.40
+MAX_DOWN_M = 0.55
 MAX_UP_M = 0.20
 XY_DEADBAND_M = 0.015      # re-plan when smoothed tag XY shifts >1.5 cm
 XY_JUMP_REJECT_M = 0.10    # any single pose >10 cm from running avg → ignore
 TRACK_RATE_HZ = 1.5        # tracking loop rate (slow enough for plan + move)
 POSE_SMOOTH_N = 5          # running-average window for /fine_loc/tag_N poses
 
-# Auto-descent on first lock: drop this far below current TCP z, but never
-# closer than INITIAL_APPROACH_STANDOFF_M to the tag's own z. Removes the
-# "arm just sits there after acquire waiting for the ↓ key" feel. The
-# final target is also clamped to never exceed the current TCP z — an
-# auto-descend must not accidentally ASCEND when the tag floor is above
-# the current TCP (that just means we're already close to the tag).
+# Auto-descent on first lock: drop this far below current TCP z, clamped
+# only by SAFETY_Z_FLOOR. Removes the "arm just sits there after acquire
+# waiting for the ↓ key" feel. The operator drives the rest with ↓/↑.
 INITIAL_DESCEND_M = 0.10
-INITIAL_APPROACH_STANDOFF_M = 0.08
 
 # Camera mount geometry (must match the static TF link_tcp → camera_link
 # published by depth_camera.launch.py). Used to compute the TCP position
@@ -132,13 +201,24 @@ CAM_OFFSET_Z_IN_TCP = 0.127
 
 # Target modes:
 #   'camera' — command TCP such that the camera's optical axis ends up on
-#              the tag. Gives visual "locked on" feedback because the tag
-#              stays in frame center. Use during tracking / approach.
-#   'tcp'    — command TCP directly to the tag XY (the camera then sits
-#              70 mm off-center in the image). Required for the final
-#              grasp so the jaws close on the tool, not next to it.
+#              the tag. Tag stays centered in image → most stable
+#              fine_localization PnP, but the 70 mm radial offset pushes
+#              the TCP target near the 5-DOF reach edge and triggers IK
+#              storms. Use only for early/distant tracking, switch off
+#              before close approach.
+#   'tcp'    — command TCP directly to the tag XY. Camera sits 70 mm
+#              off-center in the image, but jaws close on the tool and
+#              IK stays well inside the reach envelope. Required for
+#              grasp; safe default for the whole approach in practice.
 TARGET_MODE_CAMERA = 'camera'
 TARGET_MODE_TCP = 'tcp'
+# Camera-over-tag is the default. The user wants the AprilTag in the
+# CENTER of the camera frame for every tool, with no per-tool offsets.
+# In CAMERA mode the TCP target is pushed +CAM_OFFSET_X_IN_TCP radially
+# so the camera lens (70 mm off TCP) sits directly over the tag — i.e.
+# the tag projects to the image center. _do_move falls back to TCP mode
+# automatically when CAMERA-mode IK fails (notably the hammer at the
+# 5-DOF reach edge), so this default is safe across all three tools.
 DEFAULT_TARGET_MODE = TARGET_MODE_CAMERA
 
 # Safety gate: at handoff the camera is hovering directly above the
@@ -149,8 +229,14 @@ DEFAULT_TARGET_MODE = TARGET_MODE_CAMERA
 # instead of letting the arm wander off.
 SANITY_XY_RADIUS_M = 0.35
 
-SWEET_PX = {2: 107.1, 3: 116.7, 4: 108.3}
+SWEET_PX = {2: 98.0, 3: 107.5, 4: 98.0}
 SWEET_TOL_PX = 5.0
+# Per-tool tolerance override. Defaults to SWEET_TOL_PX for any tid not
+# listed. Per user calibration:
+#   phillips (fid=2) → ±2.0 px  (96–100 px range)
+#   hammer   (fid=3) → ±2.5 px  (105–110 px range, strict)
+#   flathead (fid=4) → ±2.0 px  (96–100 px range)
+SWEET_TOL_PX_PER_TID = {2: 2.0, 3: 2.5, 4: 2.0}
 GRAB_HOLD_TICKS = 3
 GRAB_RATE_HZ = 4.0
 
@@ -203,17 +289,22 @@ def _point(x, y, z):
 
 
 def _tcp_for_mode(tag_x, tag_y, phi, mode):
-    """Return the TCP XY that achieves the requested target mode.
+    """Return the TCP XY for the requested target mode.
 
-    In 'camera' mode the TCP is shifted by the inverse of the camera
-    mount offset (expressed in link_base for the commanded tool yaw
-    phi), so after the move the camera's optical axis lands on the tag.
-    In 'tcp' mode we command TCP straight at the tag — correct for the
-    final grasp, wrong for visual alignment.
+    Camera mode shifts the TCP target by the inverse of the camera
+    mount offset (rotated into link_base for the commanded tool yaw
+    phi), so the camera's optical axis lands over the tag and the
+    image stays centered on the tool through descent. This is the
+    visual-alignment behavior; required for keeping the tag in frame
+    at close range. The cost is +70 mm radial outward, which can
+    push the IK target onto the 5-DOF reach edge for tools far from
+    the base. _do_move retries with mode='tcp' when that happens.
+
+    TCP mode commands TCP straight at the tag XY — used for the final
+    grasp pose and as the IK-failure fallback for camera mode.
     """
     if mode == TARGET_MODE_CAMERA:
         cos_p, sin_p = math.cos(phi), math.sin(phi)
-        # R(π, 0, phi) @ (CAM_OFFSET_X, CAM_OFFSET_Y, *) horizontal part:
         dx = CAM_OFFSET_X_IN_TCP * cos_p + CAM_OFFSET_Y_IN_TCP * sin_p
         dy = CAM_OFFSET_X_IN_TCP * sin_p - CAM_OFFSET_Y_IN_TCP * cos_p
         return tag_x - dx, tag_y - dy
@@ -235,6 +326,9 @@ class GoTo(Node):
             GetPositionIK, '/compute_ik', callback_group=self.cb_group)
         self.gripper_client = ActionClient(
             self, GripperCommand, '/xarm_gripper/gripper_action',
+            callback_group=self.cb_group)
+        self.scene_client = self.create_client(
+            ApplyPlanningScene, '/apply_planning_scene',
             callback_group=self.cb_group)
 
         self.tf_buffer = tf2_ros.Buffer()
@@ -268,6 +362,21 @@ class GoTo(Node):
         self._target_tag_id = None
 
         self._lock = threading.Lock()
+        # Set when no gripper action is in flight; cleared while one is.
+        # _dropoff_sequence waits on this so the post-grab HOVER move
+        # can't fire while the gripper is still closing.
+        self._gripper_idle = threading.Event()
+        self._gripper_idle.set()
+        # Set when _dropoff_sequence has fully unwound (after the
+        # finally that re-adds the dropoff cart). The autonomous
+        # orchestrator (auto_go_to.py) waits on this before kicking
+        # the home transit so the planning scene is fully restored.
+        # Initially set so a never-run dropoff doesn't deadlock.
+        self._dropoff_done = threading.Event()
+        self._dropoff_done.set()
+        # Set by tool_request / home callbacks to abort an in-flight
+        # autonomous state machine. Subclass checks at every transition.
+        self._autonomous_abort = threading.Event()
         self._latest_tag_pose = None        # PoseStamped (smoothed) or None
         self._latest_tag_stamp = None       # monotonic seconds
         self._pose_window = deque(maxlen=POSE_SMOOTH_N)  # recent (x,y,z) samples
@@ -284,7 +393,18 @@ class GoTo(Node):
         self._in_band_count = 0
         self._grab_armed = False
         self._first_viz_published = False  # one-shot log when viz starts
+        # True once _dropoff_sequence has installed the synthetic target.
+        # Switches the descent safety floor from PICKUP_TOP_Z to
+        # DROPOFF_TOP_Z so the operator can fine-tune ↓/↑ above the
+        # (lower) dropoff cart surface. Reset on tool_request / home.
+        self._in_dropoff_zone = False
         self._step_idx = 0                 # cycled by 's' through STEP_SIZES_M
+        # Last good _compute_target() result. Cached every successful
+        # tracking tick so that ↑/↓/m can still operate (in pure-z) when
+        # the tag goes out of frame at close range — without this, losing
+        # the tag traps the operator with no escape but voice-home.
+        self._last_target = None
+        self._last_target_stamp = None
 
         self.create_timer(
             1.0 / TRACK_RATE_HZ, self._track_tick, callback_group=self.cb_group)
@@ -298,7 +418,8 @@ class GoTo(Node):
                 'Keyboard (closed-loop commit): ↓/Enter descend+move, '
                 '↑ raise+move, m commit-move (no z change), '
                 f's cycle step ({sizes_str}), g CLOSE gripper (manual grab), '
-                'o OPEN gripper, x toggle camera/tcp mode, h home, '
+                'o OPEN gripper, '
+                'd DROPOFF (after grab), h home, '
                 'space pause viz, q quit. '
                 'Target visualized on /go_to/target_pose + /go_to/viz — '
                 'arm does NOT auto-move; every key press rebuilds IK from '
@@ -322,12 +443,14 @@ class GoTo(Node):
             f'TOOL_REQUEST received: "{msg.data}" → parsed fiducial={fid}.')
         if fid not in TOOL_TAG_IDS:
             return
+        self._autonomous_abort.set()
         self._reset_lock_state(target=fid)
 
     def _home_request_cb(self, msg):
         self.get_logger().warn(
             f'HOME_REQUEST received on /voice_command/home_request: '
             f'"{msg.data}" — dispatching home thread.')
+        self._autonomous_abort.set()
         self._reset_lock_state(target=None)
         threading.Thread(target=self._go_home, daemon=True).start()
 
@@ -359,12 +482,21 @@ class GoTo(Node):
             self._target_z = None
             self._last_cmd_xy = None
             self._last_cmd_tag_xy = None
+            self._last_target = None
+            self._last_target_stamp = None
             self._tracking_paused = False
             self._latest_pixel_px = None
             self._latest_pixel_stamp = None
             self._in_band_count = 0
             self._grab_armed = False
             self._first_viz_published = False
+            self._in_dropoff_zone = False
+            # Restore the configured target mode. _dropoff_sequence_inner
+            # forces TARGET_MODE_TCP for its synthetic target; without
+            # this reset, the next tool request inherits TCP mode and
+            # the camera lands 70 mm off the tag — alignment looks
+            # broken on every run after the first dropoff.
+            self._target_mode = DEFAULT_TARGET_MODE
             if self._tag_sub is not None:
                 self.destroy_subscription(self._tag_sub)
                 self._tag_sub = None
@@ -404,27 +536,17 @@ class GoTo(Node):
                 if tcp is not None:
                     self._initial_tcp_z = tcp[2]
                     # Auto-descend: drop INITIAL_DESCEND_M below current
-                    # TCP z, but keep INITIAL_APPROACH_STANDOFF_M above
-                    # the tag itself. Next tick replans to this z so the
-                    # arm visibly moves closer right after acquire.
-                    # Clamp to never ASCEND — if the tag-floor or safety
-                    # floor is already above current TCP, that means we
-                    # are already at/near the approach standoff and we
-                    # should simply hold z and let keyboard take over,
-                    # not command the arm upward.
+                    # TCP z, clamped to safety floor only. Tag z is
+                    # ignored — fine_loc PnP is unreliable on this rig
+                    # and the operator drives the rest with ↓/↑.
                     descent_candidate = tcp[2] - INITIAL_DESCEND_M
-                    tag_floor = az + INITIAL_APPROACH_STANDOFF_M
-                    safety_floor = SAFETY_Z_FLOOR + 0.02
-                    initial_target = max(
-                        descent_candidate, tag_floor, safety_floor)
+                    safety_floor = self._current_safety_floor() + 0.02
+                    initial_target = max(descent_candidate, safety_floor)
                     initial_target = min(initial_target, tcp[2])
                     self._target_z = initial_target
                     self.get_logger().warn(
-                        f'AUTO_DESCEND components: '
-                        f'tcp_z={tcp[2]*1000:+.0f}mm  '
-                        f'tag_z={az*1000:+.0f}mm  '
+                        f'AUTO_DESCEND: tcp_z={tcp[2]*1000:+.0f}mm  '
                         f'descent_candidate={descent_candidate*1000:+.0f}mm  '
-                        f'tag_floor={tag_floor*1000:+.0f}mm  '
                         f'safety_floor={safety_floor*1000:+.0f}mm  '
                         f'→ target_z={initial_target*1000:+.0f}mm  '
                         f'descent_from_tcp={(tcp[2]-initial_target)*1000:+.0f}mm')
@@ -464,16 +586,24 @@ class GoTo(Node):
                         # this prompt a new operator stares at the log
                         # wondering why the arm is idle.
                         self.get_logger().warn(
-                            '╔══ LOCKED ON (closed-loop viz ready) ══╗\n'
-                            '║  Arm does NOT auto-move. Target is    ║\n'
-                            '║  published live on /go_to/target_pose ║\n'
-                            '║  + /go_to/viz (MarkerArray).          ║\n'
-                            '║                                       ║\n'
-                            '║  Press  m  → center camera on tag     ║\n'
-                            '║  Press  ↓  → descend 10 mm and move   ║\n'
-                            '║  Press  ↑  → raise   10 mm and move   ║\n'
-                            '║  Press  x  → toggle camera/tcp mode   ║\n'
-                            '╚═══════════════════════════════════════╝')
+                            '╔════ LOCKED ON (tcp mode, closed-loop) ════╗\n'
+                            '║  Arm does NOT auto-move. Target is        ║\n'
+                            '║  published on /go_to/target_pose +        ║\n'
+                            '║  /go_to/viz. Default mode = TCP (gripper  ║\n'
+                            '║  jaws over tag; image will drift at end). ║\n'
+                            '║                                           ║\n'
+                            '║  ↓/Enter  descend by current step + move  ║\n'
+                            '║  ↑        raise by current step + move    ║\n'
+                            '║  s        cycle step (10/5/1 mm)          ║\n'
+                            '║  g        CLOSE gripper   o  OPEN         ║\n'
+                            '║  m        re-commit current target        ║\n'
+                            '║  h        send arm home                   ║\n'
+                            '║                                           ║\n'
+                            '║  If tag goes out of frame at close range, ║\n'
+                            '║  ↑/↓/m fall back to the LAST GOOD pose    ║\n'
+                            '║  (XY held). You can still ↑ to back off   ║\n'
+                            '║  or g to grab from the last alignment.    ║\n'
+                            '╚═══════════════════════════════════════════╝')
 
     def _pixel_cb(self, msg):
         v = float(msg.data)
@@ -511,6 +641,11 @@ class GoTo(Node):
             target_z = self._target_z
             mode = self._target_mode
             target_tid = self._target_tag_id
+        # Tag's printed-up direction in link_base. The gripper rotates
+        # to match this so the fingers close ACROSS the tool (J5
+        # perpendicular to the shaft), and the camera-mode offset is
+        # compensated in the rotated TCP frame so the camera still
+        # lands directly over the tag center.
         tag_yaw = _quat_to_yaw_base(*tag_q)
         tcp_x, tcp_y = _tcp_for_mode(tag_x, tag_y, tag_yaw, mode)
         return {
@@ -518,6 +653,30 @@ class GoTo(Node):
             'tcp_x': tcp_x, 'tcp_y': tcp_y, 'target_z': target_z,
             'tag_yaw': tag_yaw, 'mode': mode, 'target_tid': target_tid,
         }
+
+    def _build_cached_target(self):
+        """Return a target dict reusing the last-good tag XY/yaw/quat,
+        but with the CURRENT _target_z and _target_mode applied. Returns
+        None if no tracking tick has ever succeeded.
+
+        Used as a fallback when the tag has gone out of frame mid-task,
+        so the operator can still ↑ to back off, ↓ a few mm to grab from
+        the last good alignment, or grab in place. The TCP XY is
+        recomputed for the current mode in case the operator pressed
+        'x' between the cache point and now.
+        """
+        with self._lock:
+            if self._last_target is None or self._target_z is None:
+                return None
+            cached = self._last_target
+            target_z = self._target_z
+            mode = self._target_mode
+        t = dict(cached)
+        t['target_z'] = target_z
+        t['mode'] = mode
+        t['tcp_x'], t['tcp_y'] = _tcp_for_mode(
+            t['tag_x'], t['tag_y'], t['tag_yaw'], mode)
+        return t
 
     def _publish_target_viz(self, t):
         """Publish the projected target TCP pose + MarkerArray for RViz."""
@@ -638,6 +797,11 @@ class GoTo(Node):
                 throttle_duration_sec=2.0)
             return
         self._publish_target_viz(t)
+        # Cache the last good target so manual ↑/↓/m still work after
+        # the tag goes out of frame at close range.
+        with self._lock:
+            self._last_target = t
+            self._last_target_stamp = time.monotonic()
         if not self._first_viz_published:
             self._first_viz_published = True
             self.get_logger().warn(
@@ -664,18 +828,39 @@ class GoTo(Node):
         closed-loop sample: the cached _last_cmd_* fields are only used
         by the deadband check inside _track_tick (now vestigial), not
         by the IK request itself.
+
+        Refuses to act when tracking is paused — that's the post-grab
+        state where the gripper is holding a tool and any subsequent
+        moves should be operator-driven (e.g. dropoff sequence), NOT
+        tag-tracked. Without this guard, a stray ↓ keypress after grab
+        would fire a tag-based descent that fights the dropoff plan.
         """
         with self._lock:
             in_flight = self._move_in_flight
+            paused = self._tracking_paused
         if in_flight:
             self.get_logger().warn(
                 f'COMMIT[{reason}] ignored — move already in flight.')
             return
+        if paused:
+            self.get_logger().warn(
+                f'COMMIT[{reason}] ignored — tracking paused (post-grab '
+                'or manual pause). Press space to resume tag tracking, '
+                'or use a separate node to plan dropoff.')
+            return
         t = self._compute_target()
         if t is None:
+            t = self._build_cached_target()
+            if t is None:
+                self.get_logger().warn(
+                    f'COMMIT[{reason}] ignored — no tag lock and no '
+                    'cached pose. Run detect_zone or wait for first lock.')
+                return
+            age = (time.monotonic() - (self._last_target_stamp or 0))
             self.get_logger().warn(
-                f'COMMIT[{reason}] ignored — no tag lock / stale pose.')
-            return
+                f'COMMIT[{reason}] using CACHED tag pose '
+                f'(tag lost {age:.1f}s ago) — XY held at last good '
+                f'lock, mode={t["mode"]}, z={t["target_z"]*1000:+.0f}mm.')
         ok, d_xy, tcp = self._safety_check(t['tag_x'], t['tag_y'])
         if not ok:
             self.get_logger().error(
@@ -699,27 +884,38 @@ class GoTo(Node):
                 return
             self._move_in_flight = True
         try:
-            if z < SAFETY_Z_FLOOR + 0.005:
+            floor = self._current_safety_floor()
+            if z < floor + 0.005:
                 self.get_logger().warn(
-                    f'z={z*1000:.0f}mm below floor — clamping.')
-                z = SAFETY_Z_FLOOR + 0.005
+                    f'z={z*1000:.0f}mm below floor ({floor*1000:.0f}mm) '
+                    '— clamping.')
+                z = floor + 0.005
 
-            # Try tag-yaw first (so the gripper's jaws align with the
-            # tool's long axis), then fall back to the radial yaw if IK
-            # can't satisfy the tag-yaw request. Fallback is the
-            # always-feasible choice on this 5-DOF arm.
+            # Try the requested mode first. If all yaw candidates fail
+            # IK in camera mode, automatically retry in TCP mode — that
+            # keeps tools at the workspace edge (e.g. hammer) reachable
+            # even though they exceed reach in camera mode's +70 mm
+            # offset. The tag-yaw candidate is tried first so the
+            # gripper rotates to match the tool axis (fingers close
+            # across the shaft); radial is the IK fallback.
             radial_yaw = math.atan2(tag_y, tag_x)
+            modes_to_try = [mode]
+            if mode == TARGET_MODE_CAMERA:
+                modes_to_try.append(TARGET_MODE_TCP)
+
             candidates = []
-            if tag_yaw is not None:
-                candidates.append(('tag', tag_yaw))
-            candidates.append(('radial', radial_yaw))
+            for m in modes_to_try:
+                if tag_yaw is not None:
+                    candidates.append(('tag', tag_yaw, m))
+                candidates.append(('radial', radial_yaw, m))
 
             joints = None
             used_label = None
             used_phi = None
             used_tcp = None
-            for label, phi in candidates:
-                tcp_x, tcp_y = _tcp_for_mode(tag_x, tag_y, phi, mode)
+            used_mode = mode
+            for label, phi, m in candidates:
+                tcp_x, tcp_y = _tcp_for_mode(tag_x, tag_y, phi, m)
                 pose = PoseStamped()
                 pose.header.frame_id = FRAME_ID
                 pose.header.stamp = self.get_clock().now().to_msg()
@@ -736,15 +932,16 @@ class GoTo(Node):
                     used_label = label
                     used_phi = phi
                     used_tcp = (tcp_x, tcp_y)
+                    used_mode = m
                     break
                 self.get_logger().warn(
-                    f'IK failed with {label} yaw={math.degrees(phi):+.0f}° '
+                    f'IK failed with {m}/{label} yaw={math.degrees(phi):+.0f}° '
                     f'tcp=({tcp_x*1000:.0f},{tcp_y*1000:.0f})mm; '
                     'trying next candidate.')
             if joints is None:
                 return
 
-            label = (f'track[{mode}/{used_label}] tag=({tag_x:.3f},'
+            label = (f'track[{used_mode}/{used_label}] tag=({tag_x:.3f},'
                      f'{tag_y:.3f}) tcp=({used_tcp[0]:.3f},'
                      f'{used_tcp[1]:.3f}) z={z:.3f} '
                      f'yaw={math.degrees(used_phi):+.0f}°')
@@ -754,8 +951,22 @@ class GoTo(Node):
                     self._last_cmd_xy = used_tcp
                     self._last_cmd_tag_xy = (tag_x, tag_y)
         finally:
+            # Catch up to any target_z that drifted while this move was
+            # in flight. Rapid ↓/↑ presses update _target_z but get
+            # dropped with "move already in flight"; without this auto-
+            # commit the user has to press ↓ AGAIN after each move
+            # finishes (the source of the keyboard-lag complaint).
             with self._lock:
                 self._move_in_flight = False
+                stale = (
+                    self._target_z is not None
+                    and abs(self._target_z - z) > 0.0005
+                    and not self._tracking_paused)
+            if stale:
+                threading.Thread(
+                    target=self._commit_move_to_target,
+                    args=('zfollow',),
+                    daemon=True).start()
 
     def _adjust_z(self, delta_m):
         """Step target_z by delta_m and immediately commit a move to the
@@ -766,7 +977,8 @@ class GoTo(Node):
                     'No tag locked yet — cannot step Z. Run detect_zone first.')
                 return
             new_z = (self._target_z or self._initial_tcp_z) + delta_m
-            min_z = max(SAFETY_Z_FLOOR, self._initial_tcp_z - MAX_DOWN_M)
+            min_z = max(self._current_safety_floor(),
+                        self._initial_tcp_z - MAX_DOWN_M)
             max_z = self._initial_tcp_z + MAX_UP_M
             clamped = max(min_z, min(max_z, new_z))
             if clamped != new_z:
@@ -803,7 +1015,8 @@ class GoTo(Node):
         sweet = SWEET_PX.get(tid)
         if sweet is None:
             return
-        in_band = abs(px - sweet) <= self._tol_px
+        tol = SWEET_TOL_PX_PER_TID.get(tid, self._tol_px)
+        in_band = abs(px - sweet) <= tol
         with self._lock:
             self._in_band_count = self._in_band_count + 1 if in_band else 0
             ready = (self._in_band_count >= GRAB_HOLD_TICKS
@@ -823,17 +1036,16 @@ class GoTo(Node):
             f'GRAB ARMED  → published /tool_approach/grab "{m.data}"')
 
     def _toggle_target_mode(self):
-        with self._lock:
-            new_mode = (TARGET_MODE_TCP
-                        if self._target_mode == TARGET_MODE_CAMERA
-                        else TARGET_MODE_CAMERA)
-            self._target_mode = new_mode
-            # Force a replan on the next tick so the switch is immediate.
-            self._last_cmd_xy = None
-            self._last_cmd_tag_xy = None
+        # Camera mode is permanently disabled — it pushed TCP targets
+        # 70 mm radially outward, which sat the arm on its 5-DOF reach
+        # edge and produced per-tool IK failures (the further-out the
+        # tool, the worse). TCP mode is the only mode now; this stub
+        # is kept so any stale call site is a loud no-op instead of an
+        # AttributeError.
         self.get_logger().warn(
-            f'Target mode → {new_mode}. '
-            f'{"Camera will recenter on the tag." if new_mode == TARGET_MODE_CAMERA else "TCP will move over the tag (camera ~70 mm off-center is EXPECTED)."}')
+            'Target mode toggle is disabled — TCP-over-tag is now the '
+            'only mode. Camera-recenter mode was removed because it '
+            'caused IK failures at the workspace edge.')
 
     def _force_grab(self):
         with self._lock:
@@ -868,50 +1080,57 @@ class GoTo(Node):
     def _send_gripper_blocking(self, position, label):
         """Send a GripperCommand goal and wait for the result.
 
-        Run from a worker thread (the keyboard loop's caller spawns one)
-        so the action wait doesn't block the keyboard reader.
+        Always run from a worker thread (never from the keyboard reader
+        directly) so the action wait doesn't freeze keystrokes.
+        Clears _gripper_idle on entry, sets it on exit so other threads
+        (notably _dropoff_sequence) can wait for the grip to settle.
         """
-        if not self.gripper_client.wait_for_server(timeout_sec=2.0):
-            self.get_logger().error(
-                f'GRIPPER[{label}]: action server '
-                '/xarm_gripper/gripper_action not available — '
-                'is the xarm driver up? (T1)')
-            return
-        goal = GripperCommand.Goal()
-        goal.command.position = float(position)
-        goal.command.max_effort = float(GRIPPER_EFFORT)
-        self.get_logger().warn(
-            f'GRIPPER[{label}] → position={position:.3f} '
-            f'effort={GRIPPER_EFFORT:.2f}')
-        event = threading.Event()
-        accepted = [False]
-
-        def on_result(_f):
-            event.set()
-
-        def on_goal(f):
-            gh = f.result()
-            if gh is None or not gh.accepted:
+        self._gripper_idle.clear()
+        try:
+            if not self.gripper_client.wait_for_server(timeout_sec=2.0):
                 self.get_logger().error(
-                    f'GRIPPER[{label}] goal rejected by action server.')
-                event.set()
+                    f'GRIPPER[{label}]: action server '
+                    '/xarm_gripper/gripper_action not available — '
+                    'is the xarm driver up? (T1)')
                 return
-            accepted[0] = True
-            gh.get_result_async().add_done_callback(on_result)
+            goal = GripperCommand.Goal()
+            goal.command.position = float(position)
+            goal.command.max_effort = float(GRIPPER_EFFORT)
+            self.get_logger().warn(
+                f'GRIPPER[{label}] → position={position:.3f} '
+                f'effort={GRIPPER_EFFORT:.2f}')
+            event = threading.Event()
+            accepted = [False]
 
-        self.gripper_client.send_goal_async(goal).add_done_callback(on_goal)
-        if not event.wait(timeout=GRIPPER_ACTION_TIMEOUT_S):
-            self.get_logger().warn(f'GRIPPER[{label}] timed out.')
-            return
-        if accepted[0]:
-            self.get_logger().info(f'GRIPPER[{label}] complete.')
+            def on_result(_f):
+                event.set()
+
+            def on_goal(f):
+                gh = f.result()
+                if gh is None or not gh.accepted:
+                    self.get_logger().error(
+                        f'GRIPPER[{label}] goal rejected by action server.')
+                    event.set()
+                    return
+                accepted[0] = True
+                gh.get_result_async().add_done_callback(on_result)
+
+            self.gripper_client.send_goal_async(goal).add_done_callback(on_goal)
+            if not event.wait(timeout=GRIPPER_ACTION_TIMEOUT_S):
+                self.get_logger().warn(f'GRIPPER[{label}] timed out.')
+                return
+            if accepted[0]:
+                self.get_logger().info(f'GRIPPER[{label}] complete.')
+        finally:
+            self._gripper_idle.set()
 
     def _grab_close(self):
         """Manual grab: close the gripper. Operator-driven, no tag check.
 
-        Called when the operator has visually positioned the arm over the
-        tool with the keyboard. Also marks tracking paused + grab_armed
-        so the auto-grab path doesn't re-fire on top of us.
+        Non-blocking: spawns a worker thread for the gripper action so
+        the keyboard reader stays responsive. The race against 'd' (
+        dropoff fires before grip is secure) is handled inside
+        _dropoff_sequence by waiting on _gripper_idle before any move.
         """
         with self._lock:
             self._grab_armed = True
@@ -930,10 +1149,253 @@ class GoTo(Node):
             args=(GRIPPER_OPEN_POS, 'OPEN'),
             daemon=True).start()
 
+    # ---------------------- dropoff ----------------------
+
+    def _start_dropoff(self):
+        """Operator pressed 'd' — kick off the dropoff sequence in a
+        worker thread so the keyboard reader stays responsive.
+
+        Refuses if no grab is currently held; the dropoff path is only
+        meaningful when transferring a tool from pickup to dropoff.
+        """
+        with self._lock:
+            grabbed = self._grab_armed
+        if not grabbed:
+            self.get_logger().warn(
+                'DROPOFF refused — no tool held. Press g to close the '
+                'gripper on a tool first.')
+            return
+        threading.Thread(target=self._dropoff_sequence, daemon=True).start()
+
+    def _set_cart_collision(self, cart_def: dict, enabled: bool) -> bool:
+        """ADD or REMOVE a cart from MoveIt's planning scene. Used to
+        suppress collision against pickup_cart during the post-grab
+        transit (gripper geometry is inside the cart's bounding box at
+        grab pose, so MoveIt would reject every move with a START_STATE
+        _IN_COLLISION error otherwise) and against dropoff_cart during
+        the per-tool drop pose. Returns True on success."""
+        obj = CollisionObject()
+        obj.header.frame_id = cart_def['frame']
+        obj.id = cart_def['id']
+        if enabled:
+            obj.operation = CollisionObject.ADD
+            box = SolidPrimitive()
+            box.type = SolidPrimitive.BOX
+            box.dimensions = list(cart_def['size'])
+            pose = Pose()
+            pose.position.x, pose.position.y, pose.position.z = (
+                cart_def['center'])
+            pose.orientation.w = 1.0
+            obj.primitives.append(box)
+            obj.primitive_poses.append(pose)
+        else:
+            obj.operation = CollisionObject.REMOVE
+
+        scene = PlanningScene()
+        scene.is_diff = True
+        scene.world = PlanningSceneWorld()
+        scene.world.collision_objects.append(obj)
+
+        if not self.scene_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().error(
+                'apply_planning_scene service unavailable — cannot '
+                f'{"add" if enabled else "remove"} {cart_def["id"]}.')
+            return False
+        req = ApplyPlanningScene.Request()
+        req.scene = scene
+        event = threading.Event()
+        ok = [False]
+
+        def _done(f):
+            try:
+                resp = f.result()
+                ok[0] = bool(resp and resp.success)
+            finally:
+                event.set()
+
+        self.scene_client.call_async(req).add_done_callback(_done)
+        if not event.wait(timeout=3.0):
+            self.get_logger().error(
+                f'apply_planning_scene timed out ({"add" if enabled else "remove"} '
+                f'{cart_def["id"]}).')
+            return False
+        if not ok[0]:
+            self.get_logger().error(
+                f'apply_planning_scene returned failure ({"add" if enabled else "remove"} '
+                f'{cart_def["id"]}).')
+            return False
+        self.get_logger().info(
+            f'{cart_def["id"]} collision {"ADDED" if enabled else "REMOVED"} '
+            'from planning scene.')
+        return True
+
+    def _set_dropoff_cart_collision(self, enabled: bool) -> bool:
+        return self._set_cart_collision(_DROPOFF_CART, enabled)
+
+    def _set_pickup_cart_collision(self, enabled: bool) -> bool:
+        return self._set_cart_collision(_PICKUP_CART, enabled)
+
+    def _dropoff_joint_move(self, joints_tuple, label, suppress_carts=()):
+        """Wrap _joint_move with the in-flight lock + abort-on-failure
+        logging used by the dropoff sequence. Returns True on success."""
+        joints = dict(zip(JOINT_NAMES, joints_tuple))
+        with self._lock:
+            self._move_in_flight = True
+        try:
+            ok = self._joint_move(joints, label, suppress_carts=suppress_carts)
+        finally:
+            with self._lock:
+                self._move_in_flight = False
+        if not ok:
+            self.get_logger().error(
+                f'DROPOFF: {label} move failed. Aborting — check T1 / '
+                'xArm Studio for arm state.')
+        return ok
+
+    def _dropoff_sequence(self):
+        """Two-step dropoff:
+          1) joint-move to shared HOVER_DROPOFF (safe approach pose)
+          2) joint-move to per-tool DROP_POS (reads the fiducial id of
+             the tool that was just grabbed; falls through to the hover
+             if no per-tool pose is calibrated yet)
+        Then install a synthetic target so the operator can fine-tune
+        with ↓/↑ if needed and release with 'o', exactly like pickup.
+
+        The dropoff zone has only black-square corner markers, no
+        AprilTag — there's no real tag to track. We install a synthetic
+        _latest_tag_pose at the current TCP XY and force tcp mode, so
+        the existing IK + commit pipeline runs verbatim (no special-
+        case dropoff code paths to maintain elsewhere).
+        """
+        self._dropoff_done.clear()
+        try:
+            self._dropoff_sequence_inner()
+        finally:
+            self._dropoff_done.set()
+
+    def _dropoff_sequence_inner(self):
+        with self._lock:
+            fid = self._target_tag_id
+        tool = TOOL_NAMES.get(fid, f'fid={fid}' if fid is not None else 'unknown')
+
+        # Wait for any in-flight gripper action (notably the close
+        # spawned by 'g') to finish before moving the arm. Without
+        # this, pressing 'd' immediately after 'g' starts the HOVER
+        # transit while the gripper is still closing, and the tool can
+        # slip during the move.
+        if not self._gripper_idle.wait(timeout=5.0):
+            self.get_logger().error(
+                'DROPOFF: gripper action did not settle in 5s — aborting. '
+                'Check /xarm_gripper/gripper_action.')
+            return
+
+        # Step 1: shared safe-approach hover above the dropoff cart.
+        # The arm's start state at the grab pose has the gripper geometry
+        # inside pickup_cart's bounding box (since the gripper is at the
+        # tool surface). MoveIt's CheckStartStateCollision rejects this
+        # with error_code -10 unless we suppress pickup_cart for THIS
+        # plan only — the suppress_carts kwarg attaches a one-shot
+        # planning_scene_diff to the MoveGroup goal, so the persistent
+        # planning scene (and therefore RViz) keeps showing the cart.
+        self.get_logger().warn(
+            f'DROPOFF[{tool}]: step 1/2 — moving to HOVER_DROPOFF...')
+        if not self._dropoff_joint_move(
+                HOVER_DROPOFF_JOINTS, 'HOVER-DROPOFF',
+                suppress_carts=('pickup_cart',)):
+            return
+
+        # Step 2: per-tool drop pose (if calibrated). Suppress
+        # dropoff_cart collision through the entire descend → release →
+        # retreat span — the gripper is supposed to be inside the cart's
+        # bounding volume during this window. Re-add the cart in the
+        # finally so subsequent moves are protected.
+        drop_pose = DROP_POS_BY_FID.get(fid)
+        auto_released = False
+        cart_removed = False
+        try:
+            if drop_pose is None:
+                self.get_logger().warn(
+                    f'DROPOFF[{tool}]: no DROP_POS calibrated for fid={fid}. '
+                    'Staying at HOVER_DROPOFF — descend manually with ↓ and '
+                    f'release with o, or add an entry for fid={fid} to '
+                    'DROP_POS_BY_FID_DEG in go_to.py and rebuild.')
+            else:
+                self.get_logger().warn(
+                    f'DROPOFF[{tool}]: step 2/2 — moving to '
+                    f'DROP_POS_{tool.upper()}...')
+                cart_removed = self._set_dropoff_cart_collision(False)
+                if not self._dropoff_joint_move(
+                        drop_pose, f'DROP-{tool.upper()}'):
+                    return
+                self.get_logger().warn(
+                    f'DROPOFF[{tool}]: auto-opening gripper at drop pose...')
+                self._send_gripper_blocking(GRIPPER_OPEN_POS, 'AUTO-RELEASE')
+                with self._lock:
+                    self._grab_armed = False
+                auto_released = True
+
+            tcp = self._tcp_position_unsafe()
+            if tcp is None:
+                self.get_logger().error(
+                    'DROPOFF: at drop pose but cannot read TCP — aborting '
+                    'synthetic-target setup. Use o to release in place.')
+                return
+
+            synth = PoseStamped()
+            synth.header.frame_id = FRAME_ID
+            synth.pose.position.x = tcp[0]
+            synth.pose.position.y = tcp[1]
+            synth.pose.position.z = 0.0
+            synth.pose.orientation.w = 1.0
+            synth_t = {
+                'tag_x': tcp[0], 'tag_y': tcp[1], 'tag_z': 0.0,
+                'tag_q': (0.0, 0.0, 0.0, 1.0),
+                'tcp_x': tcp[0], 'tcp_y': tcp[1], 'target_z': tcp[2],
+                'tag_yaw': math.atan2(tcp[1], tcp[0]),
+                'mode': TARGET_MODE_TCP, 'target_tid': None,
+            }
+            with self._lock:
+                self._latest_tag_pose = synth
+                self._latest_tag_stamp = time.monotonic()
+                self._initial_tcp_z = tcp[2]
+                self._target_z = tcp[2]
+                self._target_mode = TARGET_MODE_TCP
+                self._tracking_paused = False
+                self._last_target = synth_t
+                self._last_target_stamp = time.monotonic()
+                # Drop the floor for the manual fine-tune phase: the
+                # dropoff cart sits below PICKUP_TOP_Z, so descent into
+                # it would otherwise be clamped at the pickup floor.
+                self._in_dropoff_zone = True
+
+            at = ('DROP_POS' if drop_pose is not None else 'HOVER_DROPOFF')
+            if auto_released:
+                self.get_logger().warn(
+                    f'DROPOFF[{tool}]: tool released at {at} — '
+                    'returning to HOVER_DROPOFF.')
+                self._dropoff_joint_move(
+                    HOVER_DROPOFF_JOINTS, 'HOVER-DROPOFF-RETREAT')
+            else:
+                self.get_logger().warn(
+                    '╔════ DROPOFF READY (manual descent + release) ════╗\n'
+                    f'║  Tool: {tool:<8}  At: {at:<14}              ║\n'
+                    '║  No DROP_POS calibrated — finish manually.       ║\n'
+                    '║  ↓/Enter  descend by current step + move         ║\n'
+                    '║  ↑        raise by current step + move           ║\n'
+                    '║  s        cycle step (10/5/1 mm)                 ║\n'
+                    '║  o        OPEN gripper (release tool)            ║\n'
+                    '║  h        send arm home                          ║\n'
+                    '╚══════════════════════════════════════════════════╝')
+        finally:
+            if cart_removed:
+                self._set_dropoff_cart_collision(True)
+
     # ---------------------- home ----------------------
 
     def _go_home(self):
         self.get_logger().warn('HOME thread started.')
+        with self._lock:
+            self._in_dropoff_zone = False
         deadline = time.monotonic() + 6.0
         owned = False
         while time.monotonic() < deadline:
@@ -950,6 +1412,19 @@ class GoTo(Node):
                 self._move_in_flight = True
                 owned = True
         try:
+            # Two-stage home: route through HOVER_DROPOFF first so the
+            # arm lifts into clear air before any wide swings (notably
+            # the J5 unwind from drop poses where J5 ≈ -120°). Going
+            # straight from a low drop pose to all-zero would swing the
+            # wrist near the cart edge — this transit avoids that.
+            self.get_logger().warn(
+                'HOME: planning transit via HOVER_DROPOFF...')
+            transit = dict(zip(JOINT_NAMES, HOVER_DROPOFF_JOINTS))
+            if not self._joint_move(transit, 'HOME-TRANSIT(hover)'):
+                self.get_logger().error(
+                    'HOME: transit move failed — NOT continuing to '
+                    'all-zero. Recover manually via xArm Studio.')
+                return
             self.get_logger().warn(
                 'HOME: planning all-zero joint goal via MoveGroup...')
             joints = dict(zip(JOINT_NAMES, HOME_JOINTS))
@@ -972,6 +1447,16 @@ class GoTo(Node):
             return (t.x, t.y, t.z)
         except Exception:
             return None
+
+    def _current_safety_floor(self):
+        """Cart-aware z floor in link_base. PICKUP_TOP_Z (-76 mm) is the
+        right ceiling for descent into the pickup cart, but the dropoff
+        cart sits ~50 mm lower — once _dropoff_sequence has installed the
+        synthetic target, the operator's ↓/↑ keys must be allowed past
+        -76 mm to reach the dropoff surface."""
+        if self._in_dropoff_zone:
+            return _DROPOFF_TOP_Z
+        return SAFETY_Z_FLOOR
 
     # ---------------------- IK + MoveGroup ----------------------
 
@@ -1007,7 +1492,18 @@ class GoTo(Node):
             return None
         return jv
 
-    def _joint_move(self, joint_values, label):
+    def _joint_move(self, joint_values, label, suppress_carts=()):
+        """Plan + execute a joint-space move via MoveGroup.
+
+        suppress_carts: iterable of cart object IDs to remove from the
+        planning scene FOR THIS PLANNING REQUEST ONLY. The diff is
+        attached to PlanningOptions.planning_scene_diff so MoveGroup
+        forks a child scene (without those carts) for planning, leaving
+        the persistent scene — and therefore RViz — untouched. Used to
+        bypass START_STATE_IN_COLLISION (-10) on the post-grab HOVER
+        move, where the gripper sits inside the pickup_cart's bounding
+        box but reality is collision-free.
+        """
         if not self.move_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error(
                 f'[{label}] MoveGroup action server NOT available — '
@@ -1034,8 +1530,30 @@ class GoTo(Node):
         goal.planning_options.plan_only = False
         goal.planning_options.replan = True
         goal.planning_options.replan_attempts = 2
+        if suppress_carts:
+            diff = PlanningScene()
+            diff.is_diff = True
+            diff.world = PlanningSceneWorld()
+            for cart_id in suppress_carts:
+                obj = CollisionObject()
+                obj.header.frame_id = 'link_base'
+                obj.id = cart_id
+                obj.operation = CollisionObject.REMOVE
+                diff.world.collision_objects.append(obj)
+            goal.planning_options.planning_scene_diff = diff
+            self.get_logger().info(
+                f'[{label}] suppressing {list(suppress_carts)} for this plan only.')
         event = threading.Event()
         accepted = [False]
+        error_code = [None]
+
+        def on_result(f2):
+            try:
+                res = f2.result()
+                if res is not None and getattr(res, 'result', None) is not None:
+                    error_code[0] = res.result.error_code.val
+            finally:
+                event.set()
 
         def on_goal(f):
             gh = f.result()
@@ -1043,15 +1561,20 @@ class GoTo(Node):
                 event.set()
                 return
             accepted[0] = True
-            gh.get_result_async().add_done_callback(
-                lambda _f2: event.set())
+            gh.get_result_async().add_done_callback(on_result)
 
         self.move_client.send_goal_async(goal).add_done_callback(on_goal)
         if not event.wait(timeout=20.0):
-            self.get_logger().warn(f'[{label}] Move timeout.')
+            self.get_logger().error(f'[{label}] Move timeout.')
             return False
         if not accepted[0]:
-            self.get_logger().warn(f'[{label}] Move rejected.')
+            self.get_logger().error(f'[{label}] Move rejected by server.')
+            return False
+        if error_code[0] != 1:
+            self.get_logger().error(
+                f'[{label}] Move FAILED — MoveIt error_code={error_code[0]} '
+                '(1=SUCCESS). Likely planning failure: pose in collision, '
+                'IK unsolvable, or goal unreachable.')
             return False
         self.get_logger().info(f'[{label}] Move done.')
         return True
@@ -1065,7 +1588,7 @@ class GoTo(Node):
         except termios.error:
             return
         try:
-            tty.setraw(fd)
+            tty.setcbreak(fd)
             while rclpy.ok():
                 if not select.select([sys.stdin], [], [], 0.1)[0]:
                     continue
@@ -1092,8 +1615,8 @@ class GoTo(Node):
                     self._grab_open()
                 elif c == 'm':
                     self._commit_move_to_target(reason='manual')
-                elif c == 'x':
-                    self._toggle_target_mode()
+                elif c == 'd':
+                    self._start_dropoff()
                 elif c == 'h':
                     threading.Thread(target=self._go_home, daemon=True).start()
                 elif c in ('q', '\x03'):

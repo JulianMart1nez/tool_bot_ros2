@@ -10,7 +10,7 @@ Autonomous tool pick-and-place on a UFactory xArm5 (5-DOF) + UFACTORY G2 gripper
 - Driver workspace: `~/xarm_ws` (official `xarm_ros2`, NOT in this repo)
 - App workspace (this repo): `~/tool_bot_ros2`
 - Voice-command package: `~/tool_bot_ros2/voice_command` (symlinked into `~/ros2_ws/src/voice_command` so `~/ros2_ws` still builds it)
-- Active branch: `julian_tracik_integration`
+- Active branch: `logan_master`. Historical work archived under `legacy` (a single branch tip that captures `main` + `julian_tracik_integration` + `matthew_cameras` + `xarm5-ros2-starter`).
 
 ## Architecture: single-camera, voice-driven
 
@@ -60,11 +60,16 @@ Run in its own terminal so the ↑/↓ keys can drive the descent. Auto-starts o
 - **Camera:** Intel RealSense D435i, mounted on gripper. Without `realsense2_camera`, accessed as V4L2 device `/dev/video10` (RGB only, no depth). D435i depth min range ≈ 190 mm when depth is available.
 - **Gripper:** UFACTORY G2, `drive_joint` 0 = open, 0.85 = closed.
 - **End-effector link:** `link_tcp` (172 mm below `link_eef`) with gripper attached.
-- **Safety z floor:** −0.085 m in `link_base`.
+- **Safety z floor:** context-aware. `SAFETY_Z_FLOOR = PICKUP_TOP_Z = -3.07 in + 2 mm = -0.0760 m` for the pickup zone; `DROPOFF_TOP_Z = -5.00 in = -0.1270 m` once `_dropoff_sequence` has installed the synthetic target (lower because the dropoff cart sits below the pickup cart). `_current_safety_floor()` in `go_to.py` switches between the two based on `_in_dropoff_zone`.
 - **Tool AprilTags** (tag36h11, **25.4 mm (1 in)**): hammer=3, phillips=2, flathead=4. Gripper tag: **22**.
+- **Per-tool sweet pixel sizes (grab-arming bands)** — calibrated against on-tool tag photos at the grasp-ready depth:
+  - phillips (fid 2): **96–100 px** (sweet=98.0 ± 2.0)
+  - hammer (fid 3): **105–110 px** (sweet=107.5 ± 2.5, strict)
+  - flathead (fid 4): **96–100 px** (sweet=98.0 ± 2.0)
+  Defined in `go_to.py:SWEET_PX` + `SWEET_TOL_PX_PER_TID`; mirrored in `debug_overlay.py` so the IN BAND visual badge matches the grab-arming check exactly. Update both tables together.
 - **Zone markers:** black squares on white paper (1in square, on white letter-size sheets). No AprilTags on zone corners. Detected by morphological top-hat + ring/center contrast (see `detect_zone.py:detect_zone_markers`).
 - **Zone dimensions:** Pickup 14.5 in × 15.5 in (wider). Dropoff 9.0 in × 15.5 in (narrower). In camera frame at bird's-eye: pickup = RIGHT, dropoff = LEFT.
-- **Carts:** Pickup cart LEFT (+y), 24 in × 18 in, near edge 18 in from base. Dropoff cart RIGHT (−y), 34 in × 17.5 in, near edge 18 in from base, 1.5 in rim. Cart surfaces at z ≈ −2.35 in below base. Cart height: 31 in. *(Cart surface z will be re-measured by user.)*
+- **Carts:** Pickup cart LEFT (+y), 24 in × 18 in, near edge 18 in from base, surface at −3.07 in (user-measured). Dropoff cart RIGHT (−y), 34 in × 17.5 in, near edge 18 in from base, surface at −5.00 in. Cart height: 31 in. The dropoff cart's collision box is suppressed during the descend → release → retreat span (see `_set_dropoff_cart_collision`) so it only constrains pre-drop transit clearance, not the drop pose itself.
 
 ## Key joint poses (degrees → radians in code)
 
@@ -75,7 +80,7 @@ Run in its own terminal so the ↑/↓ keys can drive the descent. Auto-starts o
 
 Defined in `detect_zone.py:DETECT_ZONE_JOINTS` / `HOVER_PICKUP_JOINTS`.
 
-## Phase status (2026-04-20)
+## Phase status (2026-05-02)
 
 | Phase | Status | Notes |
 |-------|--------|-------|
@@ -88,21 +93,33 @@ Defined in `detect_zone.py:DETECT_ZONE_JOINTS` / `HOVER_PICKUP_JOINTS`.
 | 7 — Closed-loop descent | partial | rework bookmarked — see Phase 8b |
 | 8 — Overhead webcam AprilTag perception | **retired** | replaced by single-camera detect_zone |
 | 9 — Voice → detect_zone → hover → center | done | end-to-end tested on real hardware |
-| 10a — AprilTag align + keyboard trace-down | done | `tool_approach.py`; no autonomous stop, no grasp yet |
-| 10b — go_to continuous tracking + tag-acquire + grab-arming | **WIP — root cause identified 2026-04-20, fix deferred** | `go_to.py` DEFAULT_TARGET_MODE=CAMERA lands TCP 70 mm off tag → IK sits on reach edge → arm stalls at hover. One-line fix queued; see "Open bug" section. |
-| 10c — Autonomous stop + gripper close | next | depends on 10b trusted alignment |
-| 11 — Transfer to dropoff zone | future | |
+| 10a — AprilTag align + keyboard trace-down | done | `tool_approach.py` (legacy); replaced by `go_to.py` for the voice path |
+| 10b — go_to continuous tracking + tag-acquire + grab-arming | **done** | TARGET_MODE_CAMERA centers tag in image; per-tool sweet sizes drive grab-arming; tag-yaw IK candidate aligns gripper across the tool axis with radial yaw as fallback |
+| 10c — Autonomous stop + gripper close + dropoff | **done** | `auto_go_to.py` orchestrator state-machines voice → descent → grab → dropoff → home with no keyboard input. `_dropoff_sequence` transits via HOVER_DROPOFF, drops at per-tool DROP_POS, auto-opens the gripper, retreats. |
+| 11 — Per-tool dropoff calibration | in progress | DROP_POS_BY_FID_DEG defined for known tools; flathead pose calibration ongoing |
 
-## Phase 10b — what's landed this session (2026-04-20)
+## Phase 10b/10c — current state (2026-05-02)
 
-### New node: `go_to.py` (replaces `tool_approach.py` for the voice-driven path)
-- `ros2 run xarm5_basic_position_cmd go_to`
+### `go_to.py` — keyboard variant (T4 `ros2 run xarm5_basic_position_cmd go_to`)
 - Subscribes: `/voice_command/tool_request`, `/voice_command/home_request`, `/detect_zone/complete`, and dynamically subscribes to `/fine_loc/tag_<fid>` + `/fine_loc/tag_<fid>/pixel_size` for the requested fiducial.
-- **Continuous XY tracking** (1.5 Hz): replans an IK + joint-space move to `(tag_x, tag_y, target_z)` whenever the smoothed tag XY shifts past `XY_DEADBAND_M = 0.015 m`. Keyboard ↓ lowers `target_z` by `STEP_M = 0.010 m`; the next tick re-plans with the new z.
+- **TARGET_MODE_CAMERA is the default** — `_tcp_for_mode` pushes the TCP target by `+CAM_OFFSET_X_IN_TCP` radially outward so the camera (mounted −70 mm along link_tcp +X) lands directly over the AprilTag. Image stays centered on the fiducial through descent. Auto-failover to TCP mode in `_do_move` if camera-mode IK fails for every yaw candidate (preserves reachability for tools at the workspace edge, e.g. the hammer). The keyboard `x` toggle still flips modes manually.
+- **Tag-yaw IK alignment** (primary candidate): `_quat_to_yaw_base(tag_q)` extracts the printed-up direction of the AprilTag in `link_base`; `_do_move` tries that first so J5 rotates to put the gripper fingers across the tool shaft. Radial yaw `atan2(tag_y, tag_x)` is the IK fallback when tag_yaw is unreachable.
+- **Continuous XY tracking** (1.5 Hz): replans IK + joint-space move whenever the smoothed tag XY shifts past `XY_DEADBAND_M = 0.015 m`. Keyboard ↓ lowers `target_z` by the current step (10/5/1 mm cycled with `s`); the next tick re-plans at the new z.
 - **Pose smoothing + outlier reject**: running mean over `POSE_SMOOTH_N = 5` samples; any single pose more than `XY_JUMP_REJECT_M = 0.10 m` from the mean is dropped with a WARN log.
-- **Grab arming**: when `/fine_loc/tag_<fid>/pixel_size` lands within sweet_px ± 5 px for `GRAB_HOLD_TICKS = 3` consecutive samples, publishes `/tool_approach/grab` (nothing subscribes yet — actual gripper close is Phase 10c).
-- **Home via voice**: `/voice_command/home_request` triggers all-zero joint goal with WARN-level logging at every step (`HOME_REQUEST received` → `HOME thread started` → `HOME: planning` → `HOME: completed` or ERROR). CLI-bypass test: `ros2 topic pub --once /voice_command/home_request std_msgs/String "{data: cli}"`. Verified working end-to-end this session.
-- `ReentrantCallbackGroup` + `MultiThreadedExecutor(num_threads=4)` so the home callback can't be starved by tracking threads.
+- **Grab arming**: when `/fine_loc/tag_<fid>/pixel_size` lands within `SWEET_PX[tid] ± SWEET_TOL_PX_PER_TID[tid]` for `GRAB_HOLD_TICKS = 3` consecutive samples, fires the gripper close action and emits `/tool_approach/grab`.
+- **Dropoff sequence (`d`)**: HOVER_DROPOFF → per-tool DROP_POS → auto-open → HOVER_DROPOFF retreat. While there, `_in_dropoff_zone = True` lowers the safety floor to `DROPOFF_TOP_Z` and a synthetic target is installed at the current TCP so ↑/↓ still work for manual fine-tune. `_target_mode` is forced to TCP for the synthetic target and **restored to `DEFAULT_TARGET_MODE` by `_reset_lock_state`** on the next request — without that restore, the second tool request after a dropoff would inherit TCP mode and the camera would land 70 mm off-tag.
+- **Home via voice**: `/voice_command/home_request` triggers all-zero joint goal with WARN-level logging at every step. CLI-bypass test: `ros2 topic pub --once /voice_command/home_request std_msgs/String "{data: cli}"`.
+- `ReentrantCallbackGroup` + `MultiThreadedExecutor(num_threads=4)` so home/abort callbacks can't be starved by tracking threads. `_autonomous_abort` and `_dropoff_done` events let the orchestrator preempt safely.
+
+### `auto_go_to.py` — fully autonomous variant (T4 `ros2 run xarm5_basic_position_cmd auto_go_to`)
+Subclasses `GoTo` and replaces the keyboard fallback with a 5 Hz state machine. Reuses every helper in the parent (IK, MoveGroup, gripper action, dropoff sequence, planning-scene toggles); none of that logic is duplicated.
+
+States: `IDLE → WAIT_DETECT_ZONE → WAIT_TAG_LOCK → SETTLE_INITIAL → DESCEND → GRAB → DROPOFF → HOME → IDLE`. A generation counter (`_auto_gen`) bumps on every fresh tool request; in-flight worker threads (grab, dropoff, home) carry the gen they started with and refuse to mutate state when stale, so a slow worker tearing down can't stomp the new run's `_target_tag_id`.
+
+Behaviour:
+- `_tick_descend` steps `target_z` down by `DESCEND_STEP_M = 0.010 m` every `DESCEND_PERIOD_S = 1.0 s` once the previous step's move has settled.
+- Tracks `_max_pixel_seen` during the descent. At floor-touchdown without grab-arm, **force-grabs** if `max_pixel_seen ≥ FORCE_GRAB_PIXEL_FRACTION (0.55) × SWEET_PX[tid]` — handles the expected geometric fall-out where the tag exits FOV at very close range because of the 70 mm camera offset; aborts to home only if alignment never approached sweet.
+- DROPOFF runs the parent's `_dropoff_sequence` thread and waits on `_dropoff_done` (timeout 60 s). HOME runs `_go_home` inline.
 
 ### `detect_zone.py` — new post-hover "tag acquire" phase
 - After `_center_zone_in_frame('PICKUP')` succeeds, runs `_acquire_tag(fiducial_id)`:
@@ -114,7 +131,7 @@ Defined in `detect_zone.py:DETECT_ZONE_JOINTS` / `HOVER_PICKUP_JOINTS`.
 
 ### `debug_overlay.py` — image-only safety signals (no depth)
 - Published on `/debug/overlay`. Two signals: **SIZE** (measured tag edge px vs per-tool sweet size) and **ALIGN** (signed delta deg between tag's most-vertical edge pair and image vertical axis; rotate J5 by −ALIGN to correct).
-- Per-tool sweet sizes (calibrated from user screenshots at grabbable range): phillips:2 = 107.1 px, hammer:3 = 116.7 px, flathead:4 = 108.3 px (±5 px tol).
+- Per-tool sweet sizes mirrored from `go_to.SWEET_PX` (see "Per-tool sweet pixel sizes" above). Per-tool tolerance via `SWEET_TOL_PX_PER_TID`. Keep the two tables in sync.
 - IN BAND badge green iff SIZE in band AND |ALIGN| ≤ 3°.
 
 ### xArm firmware collision sensitivity
@@ -127,48 +144,17 @@ Defined in `detect_zone.py:DETECT_ZONE_JOINTS` / `HOVER_PICKUP_JOINTS`.
   ```
   If this keeps happening, drop sensitivity 3 → 2 in `xarm5_moveit_with_table.launch.py`.
 
-### Open bug — "aligning but not grabbable" (root-cause identified 2026-04-20, fix deferred to next session)
+### Resolved bugs (kept for future-Claude pattern-matching)
 
-**Symptom:** user commands "give me a hammer"; arm runs bird's-eye → hover → center → acquire cleanly, then stalls in the hover position. Even after acquiring, the gripper ends up ~70 mm off the tool so the eventual descent can never grab it.
+- **"Aligning but not grabbable" / IK reach-edge stall** (root cause 2026-04-20, resolved 2026-04-29). CAMERA mode pushes TCP +70 mm radially → workspace edge → TRAC-IK -31 storm. Fixed by adding a CAMERA→TCP fallback inside `_do_move` and adding the tag-yaw IK candidate in front of radial-yaw.
+- **Post-dropoff alignment regression** (resolved 2026-05-02). `_dropoff_sequence_inner` forces `_target_mode = TARGET_MODE_TCP` for the synthetic dropoff target; `_reset_lock_state` was not restoring it, so the second tool request after a dropoff inherited TCP mode and the camera landed 70 mm off the tag. Fix: `_reset_lock_state` now sets `self._target_mode = DEFAULT_TARGET_MODE`.
+- **Pixel-silence abort during descent** (resolved 2026-04-29). The original `auto_go_to.py` aborted to home if `pixel_size` went silent for 4 s — but the silence is the EXPECTED geometric fall-out at close range when the camera's +70 mm offset puts the tag near the FOV edge. Replaced with `_max_pixel_seen` tracking + `FORCE_GRAB_PIXEL_FRACTION = 0.55`: at floor touchdown without grab-arm, force-grab if max-seen ≥ 55 % of sweet, otherwise home.
 
-**Pre-flight verified clean this session:**
-- S1 — camera feed steady 30 Hz on `/gripper_cam/depth_camera/color/image_raw`
-- S2 — static TF `link_tcp → camera_link` = (−0.070, 0, 0.127) RPY (0°, −90°, 180°), full chain `link_base → link_tcp` resolves.
-- T3 voice needs `pip install SpeechRecognition pyaudio` + `apt install python3-pyaudio` (now installed 2026-04-20). Mic calibrated, parsing "give me a hammer" correctly.
+### Canonical terminal launch (`~/tool_bot_ros2/launch_scripts/t*.sh`, mirrored as `~/Desktop/t*.desktop`)
+`t1_robot.sh` (MoveIt + controllers + collision scene) → `t2_camera.sh` (`depth_camera.launch.py`) → `t3_voice.sh` (`voice_command_node`) → choose ONE of `t4_approach.sh` (`go_to`, keyboard) or `t4_auto.sh` (`auto_go_to`, fully autonomous). `t5_camera_view.sh` opens `rqt_image_view /debug/overlay` + the debug_overlay node. `t6_arm_monitor.sh` streams robot_states. `t7_camera_feeds.sh` = RGB + aligned_depth viewer + center-pixel depth probe.
 
-**Root cause — confirmed from go_to TRACK logs + arithmetic, not guessed:**
-`go_to.py:107` sets `DEFAULT_TARGET_MODE = TARGET_MODE_CAMERA`. In camera mode, `_tcp_for_mode()` returns the tag XY **offset by `+CAM_OFFSET_X_IN_TCP` radially outward** (CAM_OFFSET_X_IN_TCP = −0.06985). The intent is to place the camera (mounted −70 mm along link_tcp +X) over the tag — which necessarily puts the TCP 70 mm past the tag. Numerically verified on the last successful move:
-- tag in link_base = (0.485, 0.276)
-- commanded TCP   = (0.554, 0.265)
-- |Δ| = √(0.069² + 0.011²) = **0.070 m ✓** (matches −CAM_OFFSET_X_IN_TCP)
-
-**Secondary symptom = the "stall" user sees:** that 70 mm outward push lands the TCP target near the 5-DOF reachable-envelope edge at z ≈ 0.315 m. TRAC-IK returns `-31` (NO_IK_SOLUTION) for 15–20 s until the tag's yaw jitters enough that the `tag_up_yaw` candidate becomes reachable. During that window the arm doesn't move → looks "stuck at hover".
-
-Representative log (T4 bash `bvx5udgq4.output` around t=1776748777):
-```
-TRACK[hammer|camera] → tcp(501,207,412) → tag(512,264) z=312mm radial_yaw=+27°
-IK failed (code=-31) for pose (0.574,0.296,0.312).   # repeats ~18 s
-...
-[track[camera/tag] tag=(0.485,0.276) tcp=(0.554,0.265) z=0.315 yaw=-10°] Move done.
-```
-
-**Fix options to try next session (in order):**
-1. **One-line flip** — `go_to.py:107` `DEFAULT_TARGET_MODE = TARGET_MODE_TCP`. TCP goes directly to (tag_x, tag_y), gripper lands on the tag, and IK stops sitting on the reach edge. This is the test-the-hypothesis change; expect the stall to disappear too. Keep camera mode available via the keyboard 'x' toggle for the pre-alignment phase where you actually want the camera centered.
-2. **Two-phase tracker** — start in CAMERA mode (to let fine_loc see the tag cleanly), auto-flip to TCP once pixel size ≥ some threshold (tag is centered and close). Needs a state-machine edit in `go_to.py::_tick`.
-3. **Hybrid offset** — use TCP target but nudge by half the camera offset (~35 mm). Compromise that keeps the tag visible at close range while putting the gripper closer to the tool. Empirical — probably not the right call unless (1) reveals a visibility gap.
-
-**Out of scope but noticed in the same session (bookmark for later):**
-- `fine_localization` logged `flathead_screwdriver (id=4)` at `link_base pos=(+391.0,+166.3,−377.6)mm`. z=−378 mm is ~300 mm below the cart surface and well below the −85 mm safety floor — physically impossible. If go_to ever subscribes to tag_4 with this pose, it'll command the arm below the floor and get clamped. Worth a separate investigation into fine_loc's PnP stability for tag 4 (the flathead fiducial) when it's far off-axis from the camera.
-- "go home" voice command fired while a tracking move was executing; MoveIt appears to have dropped the home goal instead of preempting. Need to decide: should the home thread preempt tracking, or queue behind it? Current behavior = neither cleanly.
-
-**Next-session resume checklist:**
-1. Relaunch T1 → T2, re-run S1/S2 if anything was restarted.
-2. Apply fix option 1 (flip `DEFAULT_TARGET_MODE` to `TARGET_MODE_TCP`), `colcon build --packages-select xarm5_basic_position_cmd --symlink-install`.
-3. Voice command "give me a hammer". Expect: no IK failure storm, TCP lands on tag XY, gripper visually over the tool.
-4. Only after (3) succeeds: begin Phase 10c (autonomous stop + gripper close via `/xarm_gripper/gripper_action`).
-
-### Canonical terminal launch (`~/Desktop/t*.sh`)
-`t1_robot.sh` → `t2_camera.sh` → `t3_voice.sh` → `t4_approach.sh` (`go_to`). `t5_camera_view.sh` opens `rqt_image_view /debug/overlay`. `t6_arm_monitor.sh` streams robot_states. `t7_camera_feeds.sh` = RGB + aligned_depth viewer.
+### Live system snapshot
+`docs/system_snapshot/` contains a captured run of the full stack (`nodes.txt`, `topics.txt`, `services.txt`, `actions.txt`, per-node `node_info/*.txt`, the rendered ROS graph as `ros_graph.{gv,png,pdf}`, and the TF tree as `tf_frames.{gv,png,pdf}`). `build_rqt_graph.py` re-renders the graph from a fresh capture; `README.md` in that directory has the refresh recipe.
 
 ## Phase 9 — what exists now
 
@@ -217,23 +203,13 @@ Annotations: white crosshair at image center, yellow outlines on detected marker
   - Params on `tool_approach`: `depth_activation_pixel_size_px` (70.0), `pixel_dist_fx` (615.0), `tag_size_m` (0.0254), `standoff_m` (0.15), `step_m` (0.010).
 - `depth_camera.launch.py` is the PRIMARY launch now that `ros-jazzy-realsense2-camera` is installed: brings up the realsense driver with `align_depth.enable:=true`, the static TF, `gripper_depth_monitor`, `fine_localization` (depth ON) and `detect_zone`. `detect_zone.launch.py` is a V4L2 fallback (RGB only; depth topic absent → `tool_approach` runs pixel-size-only). `tool_approach` is intentionally NOT in either launch so its keyboard thread has a live TTY when run from its own terminal.
 
-## Next big step — Phase 10b: autonomous stop + grasp
+## Next big step — Phase 11: per-tool dropoff calibration + flathead alignment hardening
 
-Once `detect_zone` has the gripper hovering over the pickup zone and the requested tool's AprilTag (ID 2/3/4, 25.4 mm) is in view, the arm needs to approach, align, and grasp it. The design the user specified:
+`auto_go_to.py` lands the autonomous voice → grab → dropoff → home loop. Remaining work:
 
-1. **Scan for the requested tag** (`dt_apriltags` on the gripper RGB stream, already wired up in `apriltag_perception.py` / `fine_localization.py`).
-2. **Build a perpendicular axis** — the world-frame normal vector emanating from the physical AprilTag plane. For a flat tool lying on the cart, this is just `+z` in `link_base` passing through the tag center XY. (When the tag isn't horizontal, derive from the tag's pose quaternion.)
-3. **Trace the TCP onto that axis** — move the gripper in XY so the camera's optical axis coincides with the tag-normal axis. This is a pure XY refinement above the current hover height: compute the tag's (x, y) in `link_base`, plan an IK-first joint-space move that brings `link_tcp` directly above it with the gripper's tool-down orientation (`_tool_aligned_quat(x, y)` — RPY = (π, 0, atan2(y, x))).
-4. **Descend along the axis** — vertical-only motion (z decreasing) while holding (x, y) constant. Use the observed AprilTag *pixel size* as a depth proxy: as the camera gets closer, the tag grows; stop descending once the tag reaches a pre-calibrated pixel size that corresponds to "gripper fingers are at grasp depth." This sidesteps the D435i 190 mm min depth range, which is why the earlier depth-based descent was broken.
-5. **Close gripper**, then **lift** straight up on the same axis to a safe transit height.
-6. **Transfer to dropoff** — plan a joint-space move to a Hover-over-Dropoff pose (to be added, mirror of `HOVER_PICKUP_JOINTS`), descend to release height, open gripper, retract.
-
-Design notes for whoever implements Phase 10:
-- IK-first planning is mandatory on this 5-DOF arm (see "Architectural conventions" below).
-- Use the 25.4 mm physical tag size and the D435i color intrinsics (fx=fy≈615, cx=320, cy=240 @ 640×480 — `realsense_v4l2_pub.py:60`) to convert pixel size → distance analytically: `distance ≈ fx * tag_size / pixel_size`.
-- Don't rely on depth-image feedback until `realsense2_camera` is installed. Until then the AprilTag pixel-size heuristic is the depth sensor.
-- The static TF `link_tcp → camera_link` (translation −0.06985, 0, 0.127; pitch −π/2) derived in `depth_camera.launch.py:50` is still the right mount geometry. Reuse it verbatim.
-- Live-robot iteration is expensive. Build the descent math *off-robot* first (static tag pose → planned waypoints → check with TF echo), then do a single dry run, then live.
+1. **Per-tool DROP_POS calibration** — `DROP_POS_BY_FID_DEG` in `go_to.py` needs entries for every fiducial. When a tool's entry is missing, the dropoff sequence stops at HOVER_DROPOFF and waits for manual ↓/o; calibrating the joint pose makes it fully autonomous.
+2. **Flathead screwdriver alignment** — separate Claude session noted misalignment for fid=4. Pattern is well understood (PnP yaw instability when the tag is far off-axis); fix candidates include tightening detect_zone's `_acquire_tag` sweep range or post-filtering tag_yaw outliers in `_tag_pose_cb`.
+3. **Camera mount calibration drift** — vertical offset of the tag in the gripper view is not zero at "centered" alignment. Likely a small Y or pitch error in `depth_camera.launch.py`'s static TF `link_tcp → camera_link`. Tooling option: expose Y/pitch as launch args so the offset can be dialed out without rebuild.
 
 ## Architectural conventions worth remembering
 

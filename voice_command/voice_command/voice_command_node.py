@@ -45,10 +45,18 @@ class VoiceCommandNode(Node):
         self.declare_parameter('config_file', '')
         self.declare_parameter('language', 'en-US')
         self.declare_parameter('energy_threshold', 300)
+        # mic_device_index: PyAudio device index. -1 = look up by name.
+        # mic_device_name: substring matched against PyAudio device names
+        #   (case-insensitive, first hit wins). Default targets the USB
+        #   webcam mic on the gripper rig — change if you swap webcams.
+        self.declare_parameter('mic_device_index', -1)
+        self.declare_parameter('mic_device_name', 'USB 2.0 Camera')
 
         config_path = self.get_parameter('config_file').get_parameter_value().string_value
         self.language = self.get_parameter('language').get_parameter_value().string_value
         energy = self.get_parameter('energy_threshold').get_parameter_value().integer_value
+        mic_index = self.get_parameter('mic_device_index').get_parameter_value().integer_value
+        mic_name = self.get_parameter('mic_device_name').get_parameter_value().string_value
 
         if not config_path:
             share_dir = os.path.join(
@@ -70,7 +78,9 @@ class VoiceCommandNode(Node):
         # ── Microphone setup ─────────────────────────────────────────────────
         self.recogniser = sr.Recognizer()
         self.recogniser.energy_threshold = energy
-        self.microphone = sr.Microphone()
+
+        resolved_index = self._resolve_mic_index(mic_index, mic_name)
+        self.microphone = sr.Microphone(device_index=resolved_index)
 
         self.get_logger().info('Calibrating microphone — please wait...')
         with self.microphone as source:
@@ -85,6 +95,33 @@ class VoiceCommandNode(Node):
             self._audio_callback,
             phrase_time_limit=5,
         )
+
+    # ── Mic resolution ───────────────────────────────────────────────────────
+
+    def _resolve_mic_index(self, explicit_index: int, name_substr: str):
+        names = sr.Microphone.list_microphone_names()
+        if explicit_index >= 0:
+            if explicit_index >= len(names):
+                self.get_logger().warn(
+                    f'mic_device_index={explicit_index} out of range '
+                    f'({len(names)} devices); falling back to default.'
+                )
+                return None
+            self.get_logger().info(
+                f'Mic pinned by index: [{explicit_index}] {names[explicit_index]}'
+            )
+            return explicit_index
+        if name_substr:
+            needle = name_substr.lower()
+            for i, name in enumerate(names):
+                if needle in name.lower():
+                    self.get_logger().info(f'Mic pinned by name "{name_substr}": [{i}] {name}')
+                    return i
+            self.get_logger().warn(
+                f'No mic name contains "{name_substr}"; falling back to default. '
+                f'Available: {names}'
+            )
+        return None
 
     # ── Config ───────────────────────────────────────────────────────────────
 

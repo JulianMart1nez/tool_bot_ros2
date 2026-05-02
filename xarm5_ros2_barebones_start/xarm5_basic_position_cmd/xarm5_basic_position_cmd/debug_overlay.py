@@ -28,12 +28,17 @@ from sensor_msgs.msg import Image
 import dt_apriltags
 
 
-# Per-tool sweet size in px at the grabbable range, +/- TOL.
+# Per-tool sweet size in px at the grabbable range, +/- per-tool tol.
+# Mirror of go_to.SWEET_PX / SWEET_TOL_PX_PER_TID — keep these two
+# tables in sync so the IN BAND overlay matches the grab-arming check.
 SWEET_PX = {
-    2: 107.1,   # phillips
-    3: 116.7,   # hammer
-    4: 108.3,   # flathead
+    2: 98.0,    # phillips  (96-100 px)
+    3: 107.5,   # hammer    (105-110 px, strict)
+    4: 98.0,    # flathead  (96-100 px)
 }
+# Per-tool tolerance. Falls back to the sweet_tol_px node parameter
+# for any tid not listed.
+SWEET_TOL_PX_PER_TID = {2: 2.0, 3: 2.5, 4: 2.0}
 TOOL_NAMES = {2: 'phillips', 3: 'hammer', 4: 'flathead'}
 GRIPPER_TAG = 22
 RGB_TOPIC = '/gripper_cam/depth_camera/color/image_raw'
@@ -108,8 +113,9 @@ class DebugOverlay(Node):
         self.pub = self.create_publisher(Image, OUT_TOPIC, 5)
 
         self.get_logger().info(
-            f'debug_overlay: sweet_px={SWEET_PX}  tol={self.tol_px}px  '
-            f'align_tol={self.tol_deg}deg')
+            f'debug_overlay: sweet_px={SWEET_PX}  '
+            f'per_tool_tol={SWEET_TOL_PX_PER_TID}  '
+            f'default_tol={self.tol_px}px  align_tol={self.tol_deg}deg')
 
     def _cb(self, msg):
         try:
@@ -147,7 +153,8 @@ class DebugOverlay(Node):
                     for i in range(4)]))
                 edge_px = e
                 sweet = SWEET_PX[tid]
-                size_ok = abs(e - sweet) <= self.tol_px
+                tol = SWEET_TOL_PX_PER_TID.get(tid, self.tol_px)
+                size_ok = abs(e - sweet) <= tol
                 ve = vertical_edge(t.corners)
                 if ve is not None:
                     ang_deg = ve[0]

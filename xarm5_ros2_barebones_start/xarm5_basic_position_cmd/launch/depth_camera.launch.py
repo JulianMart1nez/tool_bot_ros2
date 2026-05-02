@@ -8,12 +8,21 @@ Starts:
   - gripper_camera_tf: static TF link_tcp → camera_link. The rest of the
     camera TF tree (camera_link → camera_color_optical_frame, etc.) is
     published by the driver.
+
+    Note: tried switching to UFactory's official Camera Stand
+    calibration (link_eef parent + EULER_EEF_TO_COLOR_OPT translation
+    from xArm-Developer/ufactory_vision) on 2026-04-29. The composition
+    is mathematically correct (same Rz·Ry·Rx convention) but the
+    reported tag XY landed past the xArm5's reach envelope — empirical
+    evidence that this rig's mount geometry diverges from UFactory's
+    standard Camera Stand spec (likely camera-body orientation in the
+    bracket or an in-stand calibration drift). Reverted to the
+    empirically-tuned values that previously delivered successful
+    descent at z=-69 mm. If the rig is later re-calibrated via
+    easy_handeye2, replace these values with the calibrated EULER.
   - detect_zone: voice-driven bird's-eye → scan → hover → center sequence.
   - fine_localization: per-tag 6-DOF pose + depth sampled at the tag
     center (published on /fine_loc/tag_<id>/depth).
-  - gripper_depth_monitor: legacy image-center depth monitor used by
-    test_descent. Still handy for closed-loop depth experiments.
-
 tool_approach is NOT launched here — run it in its own terminal so the
 keyboard ↑/↓ trace-down interface has a live TTY:
 
@@ -32,20 +41,16 @@ from launch_ros.actions import Node
 def generate_launch_description():
 
     # link_tcp → camera_link mount calibration, exposed as launch args
-    # so the values can be tweaked at runtime (no rebuild) while chasing
-    # the "arm wanders" bug. Defaults match the in-situ measurement
-    # described in the block comment on the static TF below.
+    # so the values can be tweaked at runtime (no rebuild).
     tcp_cam_x = DeclareLaunchArgument('tcp_cam_x', default_value='-0.06985')
     tcp_cam_y = DeclareLaunchArgument('tcp_cam_y', default_value='0.0')
     tcp_cam_z = DeclareLaunchArgument('tcp_cam_z', default_value='0.127')
     tcp_cam_roll = DeclareLaunchArgument('tcp_cam_roll', default_value='0.0')
     tcp_cam_pitch = DeclareLaunchArgument(
         'tcp_cam_pitch', default_value='-1.5707963')
-    # Default yaw is π (180°). Earlier test runs with yaw=0 showed the
-    # classic "chase/flee" pattern: reported_tag_xy ≈ 2·camera_xy − real_tag_xy,
-    # which is the fingerprint of a 180° rotation about the camera's optical
-    # axis in the link_tcp → camera_link mount transform. Override at launch
-    # with tcp_cam_yaw:=0.0 if you rebuild the mount.
+    # Yaw=π was empirically selected to fix a "chase/flee" pattern
+    # observed with yaw=0. Don't change without re-validating the
+    # full TF chain on hardware.
     tcp_cam_yaw = DeclareLaunchArgument('tcp_cam_yaw', default_value='3.14159')
 
     realsense_node = Node(
@@ -76,15 +81,7 @@ def generate_launch_description():
         output='screen',
     )
 
-    # Static transform: link_tcp → camera_link (RealSense's default root frame).
-    # Translation: camera body is 2.75in forward, centered, 5in above TCP midpoint.
-    # Rotation: RealSense `camera_link` convention is +x forward (out the lens),
-    # +y left, +z up. The camera is mounted looking *down* relative to the TCP,
-    # so camera_link's +x must point along link_tcp +z. Pitch = -π/2 about
-    # link_tcp's +y axis achieves that:
-    #   camera_link +x →  link_tcp +z   (lens points along TCP +z)
-    #   camera_link +y →  link_tcp +y   (camera "left" = TCP +y)
-    #   camera_link +z → -link_tcp +x   (camera "up"   = TCP -x)
+    # Static transform: link_tcp → camera_link.
     camera_tf = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -99,24 +96,6 @@ def generate_launch_description():
             '--frame-id', 'link_tcp',
             '--child-frame-id', 'camera_link',
         ],
-    )
-
-    depth_monitor = Node(
-        package='xarm5_basic_position_cmd',
-        executable='gripper_depth_monitor',
-        name='gripper_depth_monitor',
-        parameters=[{
-            'center_roi_size': 40,
-            'outer_roi_inner': 80,
-            'outer_roi_outer': 160,
-            'min_valid_pixels': 50,
-            'publish_rate': 15.0,
-        }],
-        remappings=[
-            ('depth_image', '/gripper_cam/depth_camera/depth/image_rect_raw'),
-            ('camera_info', '/gripper_cam/depth_camera/depth/camera_info'),
-        ],
-        output='screen',
     )
 
     fine_loc = Node(
@@ -151,7 +130,6 @@ def generate_launch_description():
         tcp_cam_yaw,
         realsense_node,
         camera_tf,
-        depth_monitor,
         fine_loc,
         detect_zone,
     ])
