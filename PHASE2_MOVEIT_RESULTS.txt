@@ -1,0 +1,141 @@
+═══════════════════════════════════════════════════════════════
+PHASE 2: MOVEIT SETUP RESULTS
+═══════════════════════════════════════════════════════════════
+
+Date: 2026-04-10
+Robot: xArm5, Firmware v2.3.0, IP 192.168.1.234
+Branch: julian_tracik_integration
+
+═══════════════════════════════════════════════════════════════
+CONFIGURATION DISCOVERED
+═══════════════════════════════════════════════════════════════
+
+Launch file (real hardware, combined driver + MoveIt):
+  xarm_moveit_config/launch/xarm5_moveit_realmove.launch.py
+
+Command used:
+  ros2 launch xarm_moveit_config xarm5_moveit_realmove.launch.py \
+    robot_ip:=192.168.1.234
+
+Kinematics config:
+  xarm_moveit_config/config/xarm5/kinematics.yaml
+  Current solver: kdl_kinematics_plugin/KDLKinematicsPlugin
+  TRAC-IK: already present as commented-out alternative
+  search_resolution: 0.005
+  timeout: 0.005
+  attempts: 3
+
+Planning groups (from SRDF):
+  - xarm5: main 5-DOF arm (joint1..joint5)
+  - xarm_gripper: if add_gripper:=true
+  - Pre-defined states: home, hold-up
+
+Nodes launched by xarm5_moveit_realmove.launch.py:
+  - robot_state_publisher
+  - joint_state_publisher
+  - ros2_control_node (with uf_robot_hardware plugin, connects to robot)
+  - xarm5_traj_controller (joint_trajectory_controller)
+  - move_group (MoveIt2 core)
+  - static_transform_publisher (world -> link_base)
+  - rviz2 (with MoveIt plugin)
+
+═══════════════════════════════════════════════════════════════
+TEST RESULTS
+═══════════════════════════════════════════════════════════════
+
+PHASE 2a: Locate MoveIt config
+  ✓ Found xarm5_moveit_realmove.launch.py
+  ✓ Identified kinematics.yaml location and current solver (KDL)
+  ✓ Identified planning group: "xarm5"
+  RESULT: PASS
+
+PHASE 2b: Launch MoveIt with real hardware
+  ✓ Driver connected: TCP control + report both up
+  ✓ ros2_control loaded UFRobotSystemHardware plugin
+  ✓ xarm5_traj_controller activated
+  ✓ move_group reported "You can start planning now!"
+  ✓ RViz opened with xArm5 model matching real robot pose
+  ✓ Robot auto-enabled via set_state (no manual enable needed)
+  RESULT: PASS
+
+PHASE 2c: Joint goal planning
+  ✓ Dragged robot model to joint goals in RViz
+  ✓ Plan succeeded, execute moved real robot smoothly
+  ✓ Robot ended at commanded joint configuration
+  RESULT: PASS (validated interactively via RViz)
+
+PHASE 2d: Pose goal planning
+  ✓ Moved interactive marker (end-effector) to various Cartesian goals
+  ✓ KDL solver produced valid IK solutions for tested poses
+  ✓ Plan + Execute: robot followed MoveIt-planned trajectories
+  ✓ Real robot motion matched RViz preview
+  RESULT: PASS (KDL solver is adequate for basic poses; TRAC-IK swap
+          still planned for Phase 3 to improve robustness near
+          singularities and joint limits)
+
+BONUS — PHASE 6 (done early): Collision scene
+  ✓ Wrote add_table_collision.py node
+  ✓ Added mounting table as CollisionObject via /apply_planning_scene
+  ✓ Table visible in RViz as gray box (correctly positioned)
+  ✓ Planning to a pose inside/through the table: FAILED as expected
+  ✓ Execute was also blocked (MoveIt refused bad plan)
+  RESULT: PASS — real safety layer in place
+
+═══════════════════════════════════════════════════════════════
+TABLE COLLISION GEOMETRY
+═══════════════════════════════════════════════════════════════
+
+Frame: link_base (xArm5 base link)
+Shape: box (axis-aligned)
+
+Measured dimensions (imperial → metric):
+  Flange plate thickness:  0.35 in  = 0.00889 m
+  Table extends L/R:       15 in    = 0.381 m each side
+  Table extends behind:    69.5 in  = 1.7653 m
+
+Box size:
+  x = 1.7653 m  (length behind robot)
+  y = 0.762 m   (full width)
+  z = 0.050 m   (slab thickness, arbitrary)
+
+Box center (in link_base frame):
+  x = -0.8827 m  (half the length behind robot)
+  y = 0.0 m      (centered on robot)
+  z = -0.0339 m  (top of box = -0.00889 m = bottom of flange)
+
+Robot reaches over EMPTY SPACE in +X direction (no table in front).
+
+═══════════════════════════════════════════════════════════════
+KNOWN ISSUES
+═══════════════════════════════════════════════════════════════
+
+1. RT scheduling warning (harmless):
+   "Could not enable FIFO RT scheduling policy: Operation not permitted"
+   The ros2_control loop runs at normal priority instead of real-time.
+   Does not affect functionality for this application.
+
+2. Octomap warning (harmless):
+   "No 3D sensor plugin(s) defined for octomap updates"
+   We don't use octomap / depth sensors. Ignore.
+
+3. recognize_objects action warning (harmless):
+   Unused MoveIt object recognition feature. Ignore.
+
+4. ROS driver Cartesian move bug from Phase 1 (via direct service):
+   Does NOT affect MoveIt — trajectory controller drives the robot
+   via different path. MoveIt + real robot works fine.
+
+═══════════════════════════════════════════════════════════════
+NEXT STEPS (Phase 3: TRAC-IK swap)
+═══════════════════════════════════════════════════════════════
+
+1. Install TRAC-IK plugin:
+     sudo apt install ros-jazzy-trac-ik
+2. Edit xarm_moveit_config/config/xarm5/kinematics.yaml:
+     Uncomment: kinematics_solver: trac_ik_kinematics_plugin/TRAC_IKKinematicsPlugin
+     Comment out the KDL line
+3. Rebuild xarm_moveit_config, relaunch MoveIt
+4. Test 10 pose goals, especially poses near joint limits
+5. Verify solver actually being called (check move_group logs for trac_ik)
+
+NEXT MILESTONE: READY FOR PHASE 3 (TRAC-IK integration)

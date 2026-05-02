@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>voice_command</name>
+  <version>0.1.0</version>
+  <description>
+    ROS 2 node that listens for spoken words, matches them against
+    configurable trigger lists, and publishes object/fiducial or command
+    messages on dedicated topics.
+  </description>
+  <maintainer email="user@example.com">Your Name</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <!-- Python system dependencies (installed via pip, not apt) -->
+  <!-- pip install SpeechRecognition pyaudio pyyaml -->
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

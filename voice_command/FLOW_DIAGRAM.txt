@@ -1,0 +1,119 @@
+================================================================
+ VOICE COMMAND NODE — Logic Flow Diagram
+================================================================
+
+
+  [ Microphone ]
+       |
+       | raw audio
+       v
+  +-----------------+
+  |  _transcribe()  |  Google STT converts audio to text
+  +-----------------+
+       |
+       |--[ unintelligible / API error ]--> DISCARD, back to listening
+       |
+       | "hand me the hammer"
+       v
+  +-----------------------------------------------+
+  |  Publish to /voice_command/raw_text           |  every utterance
+  +-----------------------------------------------+
+       |
+       v
+  +-----------------+
+  |  Normalize text |  lowercase + strip punctuation
+  +-----------------+
+       |
+       | "hand me the hammer"
+       v
+  +-----------------------------------------------+
+  |  Does text contain a command phrase?          |
+  |                                               |
+  |  command_phrases:                             |
+  |    "hand me"  "give me"  "get me"             |
+  |    "retrieve"  "grab"                         |
+  +-----------------------------------------------+
+       |                         |
+      YES                        NO
+       |                         |
+       | phrase = "hand me"      +--> REJECT, log debug, back to listening
+       | found at position 0
+       v
+  +-----------------------------------------------+
+  |  Take text AFTER the phrase end position      |
+  |                                               |
+  |  full text : "hand me the hammer"             |
+  |  after     :          " the hammer"           |
+  +-----------------------------------------------+
+       |
+       | split into whole words: ["the", "hammer"]
+       v
+  +-----------------------------------------------+
+  |  Does any whole word match a known tool?      |
+  |                                               |
+  |  tools:                                       |
+  |    hammer: 1   screwdriver: 2                 |
+  |    pliers: 3   wrench: 4                      |
+  +-----------------------------------------------+
+       |                         |
+      YES                        NO
+       |                         |
+       | tool    = "hammer"      +--> REJECT, log debug, back to listening
+       | fiducial = 1
+       v
+  +-----------------------------------------------+
+  |  Build payload string                         |
+  |  "phrase=hand me|tool=hammer|fiducial=1"      |
+  +-----------------------------------------------+
+       |
+       v
+  +-----------------------------------------------+
+  |  Publish to /voice_command/tool_request       |
+  +-----------------------------------------------+
+       |
+       v
+  [ Another node subscribes and uses fiducial ID
+    to search for the correct marker in camera feed ]
+       |
+       v
+  back to listening
+
+
+================================================================
+ REJECTION CASES
+================================================================
+
+  Utterance              Reason rejected
+  -----------------      -----------------------------------
+  "hammer"               no command phrase found
+  "I like the hammer"    no command phrase found
+  "retrieve"             phrase found, no tool word after it
+  "can you do something" no command phrase, no tool word
+  "give me"              phrase found, no tool word after it
+
+
+================================================================
+ ACCEPTED CASES
+================================================================
+
+  Utterance                   Result
+  --------------------------  ------------------------------------
+  "hand me the hammer"        phrase=hand me|tool=hammer|fiducial=1
+  "give me a screwdriver"     phrase=give me|tool=screwdriver|fiducial=2
+  "get me the pliers"         phrase=get me|tool=pliers|fiducial=3
+  "grab the wrench"           phrase=grab|tool=wrench|fiducial=4
+  "retrieve the hammer"       phrase=retrieve|tool=hammer|fiducial=1
+
+
+================================================================
+ KEY DESIGN RULES
+================================================================
+
+  1. Both phrase AND tool must be present — neither alone fires.
+  2. Tool word must appear AFTER the phrase, not before it.
+  3. Tool matching is whole-word only ("hammer" != "hammering").
+  4. First matching phrase wins; first matching tool wins.
+  5. This node only outputs the fiducial ID — it does NOT
+     verify whether the marker is visible in the camera.
+
+================================================================

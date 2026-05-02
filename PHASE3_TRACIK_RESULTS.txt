@@ -1,0 +1,140 @@
+═══════════════════════════════════════════════════════════════
+PHASE 3: TRAC-IK INTEGRATION RESULTS
+═══════════════════════════════════════════════════════════════
+
+Date: 2026-04-10
+Robot: xArm5, Firmware v2.3.0, IP 192.168.1.234
+Branch: julian_tracik_integration
+
+═══════════════════════════════════════════════════════════════
+INSTALLATION
+═══════════════════════════════════════════════════════════════
+
+Package: ros-jazzy-trac-ik-kinematics-plugin
+Version: 2.0.2-1noble.20260126.205954
+Install method: apt (official ROS2 Jazzy binary)
+
+Command used:
+  sudo apt-get install -y ros-jazzy-trac-ik-kinematics-plugin
+
+Pulled in dependencies:
+  - ros-jazzy-trac-ik-lib
+  - libnlopt-cxx0
+  - libnlopt0
+  - libnlopt-dev
+  - libnlopt-cxx-dev
+
+Plugin description found at:
+  /opt/ros/jazzy/share/trac_ik_kinematics_plugin/trac_ik_kinematics_description.xml
+
+Plugin class:
+  trac_ik_kinematics_plugin/TRAC_IKKinematicsPlugin
+  (base: kinematics::KinematicsBase)
+
+═══════════════════════════════════════════════════════════════
+KINEMATICS CONFIG CHANGE
+═══════════════════════════════════════════════════════════════
+
+File: ~/xarm_ws/src/xarm_ros2/xarm_moveit_config/config/xarm5/kinematics.yaml
+
+Backup of original KDL config:
+  ~/xarm_ws/src/xarm_ros2/xarm_moveit_config/config/xarm5/kinematics.yaml.kdl_backup
+
+Before:
+  xarm5:
+    kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
+    # kinematics_solver: trac_ik_kinematics_plugin/TRAC_IKKinematicsPlugin
+    kinematics_solver_search_resolution: 0.005
+    kinematics_solver_timeout: 0.005
+    kinematics_solver_attempts: 3
+
+After:
+  xarm5:
+    # kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
+    kinematics_solver: trac_ik_kinematics_plugin/TRAC_IKKinematicsPlugin
+    kinematics_solver_search_resolution: 0.005
+    kinematics_solver_timeout: 0.005
+    kinematics_solver_attempts: 3
+    # TRAC-IK specific: pick the solution closest to current joint state
+    solve_type: Distance
+    position_only_ik: false
+
+Parameter notes:
+  - solve_type: Distance — returns IK solution closest to current joint
+    state. Alternatives: Speed (first valid), Manipulation1/2 (favor
+    poses far from singularities). Distance gives smoothest motion.
+  - position_only_ik: false — we still constrain orientation. For the
+    5-DOF arm, full 6D poses are sometimes unreachable; TRAC-IK handles
+    this more gracefully than KDL.
+
+Because xarm_moveit_config was built with --symlink-install, the YAML
+change is picked up on relaunch with no rebuild needed.
+
+═══════════════════════════════════════════════════════════════
+TEST RESULTS (PHASE 3c)
+═══════════════════════════════════════════════════════════════
+
+TRAC-IK load verification (from move_group logs):
+  [trac_ik_kinematics_plugin]: IK Using joint link1 -3.11018 3.11018
+  [trac_ik_kinematics_plugin]: IK Using joint link2 -2.059   2.0944
+  [trac_ik_kinematics_plugin]: IK Using joint link3 -3.11018 0.19198
+  [trac_ik_kinematics_plugin]: IK Using joint link4 -1.69297 3.11018
+  [trac_ik_kinematics_plugin]: IK Using joint link5 -3.11018 3.11018
+  [trac_ik_kinematics_plugin]: Using solve type Distance
+  ✓ Confirmed: TRAC-IK is the active kinematics plugin
+  ✓ Confirmed: KDL plugin no longer loaded
+
+Notable: joint 3 has an asymmetric range (-178° to +11°), which is
+exactly the kind of joint constraint where KDL often fails. TRAC-IK's
+dual-strategy solver is designed to handle these cases well.
+
+Pose goal testing (interactive, via RViz):
+  Tester: Julian
+  Total poses tested: 10+ (varied: simple, near joint limits, awkward
+    orientations, close to base, edge of reachable workspace)
+  Failures: 0
+  Plans looked smooth and natural (no wild joint flips)
+  Real robot followed MoveIt-planned trajectories correctly
+  Collision avoidance (table) continued to work as expected
+
+RESULT: PASS — TRAC-IK solves all tested poses, including ones at the
+        edge of the reachable workspace, with smooth motion.
+
+═══════════════════════════════════════════════════════════════
+BONUS: COMBINED LAUNCH FILE
+═══════════════════════════════════════════════════════════════
+
+Created: xarm5_moveit_with_table.launch.py
+Location: xarm5_basic_position_cmd/launch/
+Purpose: Single-command launch of the full stack with the mounting
+         table auto-added to the MoveIt planning scene.
+
+Usage:
+  ros2 launch xarm5_basic_position_cmd xarm5_moveit_with_table.launch.py \
+    robot_ip:=192.168.1.234
+
+How it works:
+  1. IncludeLaunchDescription brings up xarm5_moveit_realmove.launch.py
+     (driver + ros2_control + move_group + RViz)
+  2. TimerAction waits 10 seconds for move_group to be ready
+  3. Runs add_table_collision node (one-shot: adds table, exits)
+
+This replaces the previous two-step sequence:
+  1. ros2 launch xarm_moveit_config xarm5_moveit_realmove.launch.py robot_ip:=192.168.1.234
+  2. ros2 run xarm5_basic_position_cmd add_table_collision
+
+Verified end-to-end: launch file came up cleanly, TRAC-IK loaded,
+table auto-added after delay, table visible in RViz.
+
+═══════════════════════════════════════════════════════════════
+NEXT STEPS
+═══════════════════════════════════════════════════════════════
+
+Phase 3 complete. Upcoming work unblocked:
+  - Phase 4: Reachability characterization (map feasible workspace)
+  - Phase 6: Already done early (collision scene)
+  - Phase 7a: Gripper open/close ROS service testing
+
+Phase 4 is the natural next step: systematically explore the reachable
+Cartesian workspace with TRAC-IK active, to produce a reachability map
+that constrains Phase 5 (grasp pose generator).
