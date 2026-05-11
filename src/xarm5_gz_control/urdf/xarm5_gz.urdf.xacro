@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  xArm5 + Gripper URDF for Gazebo Harmonic
+  ==========================================
+  This xacro file calls UFACTORY's xarm_device.urdf.xacro with:
+    - ros2_control_plugin = gz_ros2_control/GazeboSimSystem
+      (apt-installed, works on Jazzy — does NOT need xarm_controller)
+    - dof = 5
+    - add_gripper = true
+    - limited = true  (enforces real joint limits)
+
+  The gz_ros2_control plugin replaces UFRobotSystemHardware entirely for
+  simulation.  Real hardware mode uses a separate launch file that sets
+  the plugin back to uf_robot_hardware/UFRobotSystemHardware.
+-->
+<robot xmlns:xacro="http://ros.org/wiki/xacro" name="UF_ROBOT">
+
+  <!-- Include UFACTORY's device macro -->
+  <xacro:include filename="$(find xarm_description)/urdf/xarm_device_macro.xacro"/>
+
+  <!-- Instantiate xArm5 with Gazebo Harmonic gz_ros2_control plugin -->
+  <xacro:xarm_device
+    prefix=""
+    hw_ns="xarm"
+    limited="true"
+    effort_control="false"
+    velocity_control="false"
+    add_gripper="true"
+    add_vacuum_gripper="false"
+    add_bio_gripper="false"
+    dof="5"
+    robot_type="xarm"
+    ros2_control_plugin="gz_ros2_control/GazeboSimSystem"
+    ros2_control_params="$(find xarm5_gz_control)/config/ros2_controllers.yaml"
+    load_gazebo_plugin="true"
+    add_realsense_d435i="false"
+    add_d435i_links="false"
+    add_other_geometry="false"
+    geometry_type="box"
+    geometry_mass="0.1"
+    geometry_height="0.1"
+    geometry_radius="0.1"
+    geometry_length="0.1"
+    geometry_width="0.1"
+    geometry_mesh_filename=""
+    geometry_mesh_origin_xyz="0 0 0"
+    geometry_mesh_origin_rpy="0 0 0"
+    geometry_mesh_tcp_xyz="0 0 0"
+    geometry_mesh_tcp_rpy="0 0 0"
+    robot_ip=""
+    report_type="normal"
+    baud_checkset="true"
+    default_gripper_baud="2000000"
+    model1300="false"
+    attach_to="world"
+    attach_xyz="0 0 0"
+    attach_rpy="0 0 0"
+    robot_sn=""
+    use_gazebo_camera="false"
+    mesh_suffix="stl"
+    kinematics_suffix=""
+  />
+
+</robot>

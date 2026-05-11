@@ -1,0 +1,185 @@
+# moveit_config.yaml
+# MoveIt2 2.12 / ROS2 Jazzy configuration for xArm5 + gripper
+# ROS2 Jazzy requires the ros__parameters wrapper — flat format no longer works.
+
+/**:
+  ros__parameters:
+
+    # ── Kinematics ──────────────────────────────────────────────────────────
+    robot_description_kinematics:
+      xarm5:
+        kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
+        kinematics_solver_search_resolution: 0.005
+        kinematics_solver_timeout: 0.005
+        kinematics_solver_attempts: 3
+      xarm_gripper:
+        kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
+        kinematics_solver_search_resolution: 0.005
+        kinematics_solver_timeout: 0.005
+        kinematics_solver_attempts: 3
+
+    # ── Joint Limits ─────────────────────────────────────────────────────────
+    robot_description_planning:
+      joint_limits:
+        joint1:
+          has_velocity_limits: true
+          max_velocity: 2.14
+          has_acceleration_limits: true
+          max_acceleration: 10.0
+        joint2:
+          has_velocity_limits: true
+          max_velocity: 2.14
+          has_acceleration_limits: true
+          max_acceleration: 10.0
+        joint3:
+          has_velocity_limits: true
+          max_velocity: 2.14
+          has_acceleration_limits: true
+          max_acceleration: 10.0
+        joint4:
+          has_velocity_limits: true
+          max_velocity: 2.14
+          has_acceleration_limits: true
+          max_acceleration: 10.0
+        joint5:
+          has_velocity_limits: true
+          max_velocity: 2.14
+          has_acceleration_limits: true
+          max_acceleration: 10.0
+        drive_joint:
+          has_velocity_limits: true
+          max_velocity: 3.14
+          has_acceleration_limits: true
+          max_acceleration: 10.0
+
+    # ── Planning Pipelines ───────────────────────────────────────────────────
+    planning_pipelines:
+      pipeline_names:
+        - ompl
+
+    # ── OMPL Pipeline (MoveIt2 2.x / Jazzy format) ──────────────────────────
+    ompl:
+      planning_plugins:
+        - ompl_interface/OMPLPlanner
+      request_adapters:
+        - default_planning_request_adapters/ResolveConstraintFrames
+        - default_planning_request_adapters/ValidateWorkspaceBounds
+        - default_planning_request_adapters/CheckStartStateBounds
+        - default_planning_request_adapters/CheckStartStateCollision
+      response_adapters:
+        - default_planning_response_adapters/AddTimeOptimalParameterization
+        - default_planning_response_adapters/ValidateSolution
+        - default_planning_response_adapters/DisplayMotionPath
+      start_state_max_bounds_error: 0.1
+      # ── Planner type definitions (required by MoveItPy — move_group has
+      #    built-in fallbacks but the Python bindings do not) ──────────────
+      planner_configs:
+        RRTConnect:
+          type: geometric::RRTConnect
+          range: 0.0
+        RRT:
+          type: geometric::RRT
+          range: 0.0
+          goal_bias: 0.05
+        RRTstar:
+          type: geometric::RRTstar
+          range: 0.0
+          goal_bias: 0.05
+        TRRT:
+          type: geometric::TRRT
+          range: 0.0
+          goal_bias: 0.05
+          temp_change_factor: 2.0
+          min_temperature: 0.0000000001
+          init_temperature: 0.000001
+        EST:
+          type: geometric::EST
+          range: 0.0
+          goal_bias: 0.05
+        LBKPIECE:
+          type: geometric::LBKPIECE
+          range: 0.0
+          border_fraction: 0.9
+          min_valid_path_fraction: 0.5
+        BKPIECE:
+          type: geometric::BKPIECE
+          range: 0.0
+          border_fraction: 0.9
+          min_valid_path_fraction: 0.5
+        KPIECE:
+          type: geometric::KPIECE
+          range: 0.0
+          goal_bias: 0.05
+          border_fraction: 0.9
+          min_valid_path_fraction: 0.5
+        BiEST:
+          type: geometric::BiEST
+          range: 0.0
+        PRM:
+          type: geometric::PRM
+          max_nearest_neighbors: 10
+        PRMstar:
+          type: geometric::PRMstar
+      xarm5:
+        default_planner_config: RRTConnect
+        planner_configs:
+          - RRTConnect
+          - RRT
+          - RRTstar
+          - TRRT
+          - EST
+          - LBKPIECE
+          - BKPIECE
+          - KPIECE
+          - BiEST
+          - PRM
+          - PRMstar
+      xarm_gripper:
+        default_planner_config: RRTConnect
+        planner_configs:
+          - RRTConnect
+
+    # ── MoveIt Controller Manager ────────────────────────────────────────────
+    moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+
+    moveit_simple_controller_manager:
+      controller_names:
+        - xarm5_traj_controller
+        - xarm_gripper_traj_controller
+      xarm5_traj_controller:
+        type: FollowJointTrajectory
+        action_ns: follow_joint_trajectory
+        default: true
+        joints:
+          - joint1
+          - joint2
+          - joint3
+          - joint4
+          - joint5
+      xarm_gripper_traj_controller:
+        type: FollowJointTrajectory
+        action_ns: follow_joint_trajectory
+        default: true
+        joints:
+          - drive_joint
+
+    # ── Trajectory Execution ─────────────────────────────────────────────────
+    trajectory_execution:
+      allowed_execution_duration_scaling: 1.2
+      allowed_goal_duration_margin: 0.5
+      allowed_start_tolerance: 0.01
+      execution_duration_monitoring: true
+
+    # ── Planning Scene Monitor ───────────────────────────────────────────────
+    planning_scene_monitor_options:
+      name: planning_scene_monitor
+      robot_description: robot_description
+      joint_state_topic: /joint_states
+      attached_collision_object_topic: /move_group/planning_scene_monitor
+      publish_planning_scene_topic: /move_group/publish_planning_scene
+      monitored_planning_scene_topic: /move_group/monitored_planning_scene
+      wait_for_initial_state_timeout: 10.0
+
+    # ── Capabilities ─────────────────────────────────────────────────────────
+    capabilities: ""
+    disable_capabilities: ""

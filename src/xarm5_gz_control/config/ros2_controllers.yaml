@@ -1,0 +1,65 @@
+# ros2_controllers.yaml
+# Controller configuration for xArm5 + xArm Gripper
+# Used by gz_ros2_control in Gazebo Harmonic simulation
+#
+# Joint names must exactly match those in the UFACTORY URDF:
+#   Arm:     joint1, joint2, joint3, joint4, joint5
+#   Gripper: drive_joint  (mimic joints are passive, not commanded)
+
+controller_manager:
+  ros__parameters:
+    update_rate: 100  # Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    xarm5_traj_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    xarm_gripper_traj_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+# Arm trajectory controller
+xarm5_traj_controller:
+  ros__parameters:
+    joints:
+      - joint1
+      - joint2
+      - joint3
+      - joint4
+      - joint5
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 50.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    open_loop_control: true
+    constraints:
+      stopped_velocity_tolerance: 0.01
+      goal_time: 0.0
+      joint1: { trajectory: 0.5, goal: 0.05 }
+      joint2: { trajectory: 0.5, goal: 0.05 }
+      joint3: { trajectory: 0.5, goal: 0.05 }
+      joint4: { trajectory: 0.5, goal: 0.05 }
+      joint5: { trajectory: 0.5, goal: 0.05 }
+
+# Gripper trajectory controller
+xarm_gripper_traj_controller:
+  ros__parameters:
+    joints:
+      - drive_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 50.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    open_loop_control: true
+    constraints:
+      stopped_velocity_tolerance: 0.05
+      goal_time: 0.0

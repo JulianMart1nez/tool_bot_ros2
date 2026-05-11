@@ -1,0 +1,65 @@
+# servo_config.yaml
+# MoveIt Servo 2.12 (Jazzy) — all params must be under moveit_servo: namespace
+# (ServoNode uses generate_parameter_library with moveit_servo. prefix)
+
+/**:
+  ros__parameters:
+    moveit_servo:
+
+      # ── Timing ─────────────────────────────────────────────────────────────
+      publish_period: 0.034          # ~30 Hz [seconds]
+      max_expected_latency: 0.1      # max delay between command and execution [s]
+
+      # ── Incoming command ───────────────────────────────────────────────────
+      command_in_type: "speed_units" # m/s and rad/s
+      scale:
+        linear: 0.15                 # max linear EE speed [m/s]
+        rotational: 0.3              # max angular EE speed [rad/s]
+        joint: 0.5                   # max joint speed [rad/s]
+
+      incoming_command_timeout: 0.2  # discard commands older than this [s]
+
+      # ── Outgoing command ───────────────────────────────────────────────────
+      command_out_type: trajectory_msgs/JointTrajectory
+      command_out_topic: /xarm5_traj_controller/joint_trajectory
+      publish_joint_positions: true
+      publish_joint_velocities: true
+      publish_joint_accelerations: false
+
+      # ── Smoothing ──────────────────────────────────────────────────────────
+      use_smoothing: true
+      smoothing_filter_plugin_name: "online_signal_smoothing::ButterworthFilterPlugin"
+
+      # ── MoveIt group ───────────────────────────────────────────────────────
+      move_group_name: xarm5
+
+      # ── Planning scene ─────────────────────────────────────────────────────
+      # false = use move_group's planning scene (don't create a duplicate)
+      is_primary_planning_scene_monitor: false
+      check_octomap_collisions: false
+      monitored_planning_scene_topic: /move_group/monitored_planning_scene
+
+      # ── Joint state input ──────────────────────────────────────────────────
+      joint_topic: /joint_states
+
+      # ── Topic names ────────────────────────────────────────────────────────
+      cartesian_command_in_topic: ~/delta_twist_cmds
+      joint_command_in_topic: ~/delta_joint_cmds
+      status_topic: ~/status
+
+      # ── Singularity safety ─────────────────────────────────────────────────
+      lower_singularity_threshold: 17.0
+      hard_stop_singularity_threshold: 30.0
+      leaving_singularity_threshold_multiplier: 2.0
+      singularity_step_scale: 0.01
+
+      # ── Joint limit safety ─────────────────────────────────────────────────
+      joint_limit_margins: [0.1]     # [rad] buffer inside joint limits
+      halt_all_joints_in_joint_mode: true
+      halt_all_joints_in_cartesian_mode: true
+
+      # ── Collision checking ─────────────────────────────────────────────────
+      check_collisions: true
+      collision_check_rate: 10.0
+      self_collision_proximity_threshold: 0.01   # [m]
+      scene_collision_proximity_threshold: 0.02  # [m]

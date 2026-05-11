@@ -1,0 +1,17 @@
+# ROS2 colcon build artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Windows Zone.Identifier sidecar files (created by WSL/Windows downloads)
+*:Zone.Identifier
+
+# Editor
+.vscode/
+*.swp
+*~
